@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { ensureChatHubSchema, getSql } from '@/lib/neon';
+import { ensureChatHubSchema, getSql } from '../../../../lib/neon';
 
 export const dynamic='force-dynamic';
 
