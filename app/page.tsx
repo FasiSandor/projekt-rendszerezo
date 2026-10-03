@@ -13,6 +13,7 @@ type ChatItem={
   assignedProjectId?:string;topicId?:string;archived?:boolean;projectRef?:string|null;
 };
 type Topic={id:string;projectId:string;name:string;createdAt:string};
+type ImportLog={id:string;date:string;fileName:string;total:number;added:number;updated:number;unchanged:number;assigned:number};
 
 const starter:Project[]=[
 {id:'ertesites',name:'Értesítési Központ',category:'APP FEJLESZTÉS',chats:16,accent:'blue',status:'Aktív',summary:'Gmail, Messenger, iMessage és naptárkapcsolatok.',next:'iMessage + sebesség',last:'Ma',tags:['Gmail','Messenger','Naptár'],favorite:true},
@@ -240,7 +241,8 @@ export default function Home(){
  const [selectedChatIds,setSelectedChatIds]=useState<string[]>([]);
  const [showArchived,setShowArchived]=useState(false);
  const [showProjectArchive,setShowProjectArchive]=useState(false);
- const [importSummary,setImportSummary]=useState<{total:number;assigned:number}|null>(null);
+ const [importLogs,setImportLogs]=useState<ImportLog[]>([]);
+ const [importSummary,setImportSummary]=useState<{total:number;added:number;updated:number;unchanged:number;assigned:number}|null>(null);
  const fileRef=useRef<HTMLInputElement>(null);
  const backupRef=useRef<HTMLInputElement>(null);
 
@@ -248,13 +250,16 @@ export default function Home(){
    const p=localStorage.getItem('chathub-projects-v2');
    const c=localStorage.getItem('chathub-chats-v2');
    const t=localStorage.getItem('chathub-topics-v1');
+   const l=localStorage.getItem('chathub-import-log-v1');
    if(p){try{setProjects(JSON.parse(p))}catch{}}
    if(c){try{setChats(JSON.parse(c))}catch{}}
    if(t){try{setTopics(JSON.parse(t))}catch{}}
+   if(l){try{setImportLogs(JSON.parse(l))}catch{}}
  },[]);
  useEffect(()=>{localStorage.setItem('chathub-projects-v2',JSON.stringify(projects))},[projects]);
  useEffect(()=>{localStorage.setItem('chathub-chats-v2',JSON.stringify(chats))},[chats]);
  useEffect(()=>{localStorage.setItem('chathub-topics-v1',JSON.stringify(topics))},[topics]);
+ useEffect(()=>{localStorage.setItem('chathub-import-log-v1',JSON.stringify(importLogs))},[importLogs]);
 
  const visible=useMemo(()=>projects.map(p=>({
    p,score:fuzzyScore(query,p.name+' '+p.category+' '+p.summary+' '+p.tags.join(' '))
@@ -313,27 +318,42 @@ export default function Home(){
      const raw=JSON.parse(await file.text());
      const list=Array.isArray(raw)?raw:Array.isArray(raw?.conversations)?raw.conversations:null;
      if(!list)throw new Error('Nem conversations.json');
+     const existing=new Map(chats.map(c=>[c.id,c]));
+     let added=0,updatedCount=0,unchanged=0;
      const parsed:ChatItem[]=list.map((c:any,i:number)=>{
        const title=(c?.title||'Névtelen beszélgetés').toString();
        const {preview,searchText}=conversationTexts(c);
-       const assignedProjectId=inferProject(title,searchText||preview,projects);
-       return {
-         id:(c?.id||c?.conversation_id||('import-'+i)).toString(),
-         title,preview,searchText,updated:new Date((c?.update_time||c?.create_time||0)*1000||Date.now()).toISOString(),
-         source:'import' as const,assignedProjectId,projectRef:c?.project_id||null
+       const id=(c?.id||c?.conversation_id||('import-'+i)).toString();
+       const old=existing.get(id);
+       const autoProject=old?.assignedProjectId||inferProject(title,searchText||preview,projects);
+       const fresh:ChatItem={
+         id,title,preview,searchText,
+         updated:new Date((c?.update_time||c?.create_time||0)*1000||Date.now()).toISOString(),
+         source:'import',assignedProjectId:autoProject,projectRef:c?.project_id||old?.projectRef||null,
+         topicId:old?.topicId,archived:old?.archived
        };
+       if(!old)added++;
+       else{
+         const changed=old.title!==fresh.title||old.preview!==fresh.preview||old.searchText!==fresh.searchText||old.updated!==fresh.updated;
+         if(changed)updatedCount++;else unchanged++;
+       }
+       return fresh;
      });
      const unique=new Map<string,ChatItem>();
-     for(const c of [...chats,...parsed])unique.set(c.id,c);
+     for(const c of chats)unique.set(c.id,c);
+     for(const c of parsed)unique.set(c.id,c);
      const next=[...unique.values()];
      setChats(next);
      const counts=new Map<string,number>();
-     parsed.forEach(c=>{if(c.assignedProjectId)counts.set(c.assignedProjectId,(counts.get(c.assignedProjectId)||0)+1)});
-     setProjects(ps=>ps.map(p=>counts.has(p.id)?{...p,chats:Math.max(p.chats,counts.get(p.id)||0)}:p));
+     next.filter(c=>!c.archived).forEach(c=>{if(c.assignedProjectId)counts.set(c.assignedProjectId,(counts.get(c.assignedProjectId)||0)+1)});
+     setProjects(ps=>ps.map(p=>counts.has(p.id)?{...p,chats:counts.get(p.id)||0}:p));
      const assigned=parsed.filter(c=>c.assignedProjectId).length;
-     setImportSummary({total:parsed.length,assigned});
+     const summary={total:parsed.length,added,updated:updatedCount,unchanged,assigned};
+     setImportSummary(summary);
+     const log:ImportLog={id:crypto.randomUUID(),date:new Date().toISOString(),fileName:file.name,total:parsed.length,added,updated:updatedCount,unchanged,assigned};
+     setImportLogs(xs=>[log,...xs].slice(0,12));
      setShowImport(false);setShowChats(true);
-     flash(parsed.length+' chat importálva');
+     flash(added?added+' új chat hozzáadva':updatedCount?updatedCount+' chat frissítve':'Nincs új változás');
    }catch{
      alert('Ezt a fájlt nem tudtam conversations.json-ként beolvasni.');
    }finally{
@@ -470,7 +490,7 @@ export default function Home(){
      <Stat icon="✦" n={duplicateGroups.length} label="Duplikáció" c="orange"/>
    </section>
 
-   {importSummary&&<section className="importBanner"><div><small>LEGUTÓBBI IMPORT</small><b>{importSummary.total} beszélgetés</b><span>{importSummary.assigned} automatikusan projekthez rendelve · {importSummary.total-importSummary.assigned} még rendezetlen</span></div><button onClick={()=>setShowChats(true)}>Chatek rendezése →</button></section>}
+   {importSummary&&<section className="importBanner"><div><small>LEGUTÓBBI IMPORT</small><b>{importSummary.total} beszélgetés</b><span><strong>+{importSummary.added} új</strong> · {importSummary.updated} frissült · {importSummary.unchanged} változatlan · {importSummary.total-importSummary.assigned} rendezetlen</span></div><button onClick={()=>setShowChats(true)}>Chatek rendezése →</button></section>}
 
    <Head title={showProjectArchive?'Archivált projektek':'Aktív projektek'} sub={showProjectArchive?'Lezárt és parkolópályás munkák':'A legfontosabb munkáid most'}/>
    <div className="projectMode"><button className={!showProjectArchive?'on':''} onClick={()=>setShowProjectArchive(false)}>Aktív</button><button className={showProjectArchive?'on':''} onClick={()=>setShowProjectArchive(true)}>Archív</button></div>
@@ -568,12 +588,13 @@ export default function Home(){
 
    {showImport&&<div className="overlay" onClick={()=>setShowImport(false)}><section className="composer importModal" onClick={e=>e.stopPropagation()}>
       <div className="bigIco">⇩</div><h2>ChatGPT előzmények importja</h2>
-      <p>A ChatGPT adatexport ZIP-jéből válaszd ki a <b>conversations.json</b> fájlt. Az app beolvassa a beszélgetések címét, utolsó dátumát és egy rövid saját előnézetet, majd megpróbálja projektekhez sorolni őket.</p>
+      <p>A ChatGPT adatexport ZIP-jéből válaszd ki a <b>conversations.json</b> fájlt. Első alkalommal felépíti a katalógust, később pedig <b>inkrementálisan frissít</b>: az új és módosult chateket beolvassa, a már kézzel kialakított projekt-, téma- és archív besorolást megtartja.</p>
       <div className="privacyBox"><b>Helyben dolgozik</b><span>A fájlt ez a verzió nem tölti fel szerverre; a feldolgozás és mentés a böngésződben történik.</span></div>
+      {importLogs.length>0&&<div className="importHistory"><div className="historyHead"><b>Korábbi importok</b><span>utolsó {Math.min(importLogs.length,5)}</span></div>{importLogs.slice(0,5).map(l=><div className="historyRow" key={l.id}><div><strong>{niceDate(l.date)}</strong><span>{l.fileName}</span></div><div><b>+{l.added}</b><span>{l.updated} frissült · {l.unchanged} változatlan</span></div></div>)}</div>}
       <input ref={fileRef} className="fileInput" type="file" accept=".json,application/json" onChange={importFile}/>
       <div className="backupStrip"><div><b>ChatHub biztonsági mentés</b><span>Projektjeid, témáid és rendezésed külön JSON-fájlba menthető.</span></div><div><button className="soft" onClick={exportBackup}>⇩ Mentés</button><button className="soft" onClick={()=>backupRef.current?.click()}>⇧ Visszaállítás</button></div></div>
       <input ref={backupRef} className="fileInput" type="file" accept=".json,application/json" onChange={importBackup}/>
-      <div className="composerBtns"><button className="soft" onClick={()=>setShowImport(false)}>Mégse</button><button className="primary" onClick={()=>fileRef.current?.click()}>ChatGPT fájl kiválasztása</button></div>
+      <div className="composerBtns"><button className="soft" onClick={()=>setShowImport(false)}>Mégse</button><button className="primary" onClick={()=>fileRef.current?.click()}>{importLogs.length?'ChatGPT export frissítése':'ChatGPT fájl kiválasztása'}</button></div>
    </section></div>}
 
    {toast&&<div className="toast">{toast}</div>}
