@@ -15,6 +15,7 @@ type ChatItem={
 type Topic={id:string;projectId:string;name:string;createdAt:string};
 type ImportLog={id:string;date:string;fileName:string;total:number;added:number;updated:number;unchanged:number;assigned:number};
 type CloudStatus={connected:boolean;authConfigured:boolean;database:string;region?:string;schemaReady?:boolean;error?:string};
+type CloudUser={id:string;email?:string;name?:string};
 
 const starter:Project[]=[
 {id:'ertesites',name:'Értesítési Központ',category:'APP FEJLESZTÉS',chats:16,accent:'blue',status:'Aktív',summary:'Gmail, Messenger, iMessage és naptárkapcsolatok.',next:'iMessage + sebesség',last:'Ma',tags:['Gmail','Messenger','Naptár'],favorite:true},
@@ -259,6 +260,14 @@ export default function Home(){
  const [showCloud,setShowCloud]=useState(false);
  const [cloudStatus,setCloudStatus]=useState<CloudStatus|null>(null);
  const [cloudLoading,setCloudLoading]=useState(false);
+ const [cloudUser,setCloudUser]=useState<CloudUser|null>(null);
+ const [authMode,setAuthMode]=useState<'signin'|'signup'>('signin');
+ const [authEmail,setAuthEmail]=useState('');
+ const [authPassword,setAuthPassword]=useState('');
+ const [authName,setAuthName]=useState('Sándor');
+ const [cloudBusy,setCloudBusy]=useState(false);
+ const [lastCloudSync,setLastCloudSync]=useState('');
+ const [hydrated,setHydrated]=useState(false);
  const [importLogs,setImportLogs]=useState<ImportLog[]>([]);
  const [importSummary,setImportSummary]=useState<{total:number;added:number;updated:number;unchanged:number;assigned:number}|null>(null);
  const fileRef=useRef<HTMLInputElement>(null);
@@ -273,12 +282,19 @@ export default function Home(){
    if(c){try{setChats(JSON.parse(c))}catch{}}
    if(t){try{setTopics(JSON.parse(t))}catch{}}
    if(l){try{setImportLogs(JSON.parse(l))}catch{}}
+   setLastCloudSync(localStorage.getItem('chathub-last-cloud-sync-v1')||'');
+   setHydrated(true);
  },[]);
  useEffect(()=>{localStorage.setItem('chathub-projects-v2',JSON.stringify(projects))},[projects]);
  useEffect(()=>{localStorage.setItem('chathub-chats-v2',JSON.stringify(chats))},[chats]);
  useEffect(()=>{localStorage.setItem('chathub-topics-v1',JSON.stringify(topics))},[topics]);
  useEffect(()=>{localStorage.setItem('chathub-import-log-v1',JSON.stringify(importLogs))},[importLogs]);
- useEffect(()=>{void refreshCloudStatus()},[]);
+ useEffect(()=>{void refreshCloudStatus();void refreshCloudSession()},[]);
+ useEffect(()=>{
+   if(!hydrated||!cloudUser)return;
+   const timer=setTimeout(()=>{void pushCloud(false)},2200);
+   return ()=>clearTimeout(timer);
+ },[projects,chats,topics,importLogs,hydrated,cloudUser?.id]);
  async function refreshCloudStatus(){
    setCloudLoading(true);
    try{
@@ -287,6 +303,71 @@ export default function Home(){
      setCloudStatus(data);
    }catch{setCloudStatus({connected:false,authConfigured:false,database:'Neon',error:'Kapcsolódási hiba'})}
    finally{setCloudLoading(false)}
+ }
+ async function refreshCloudSession(){
+   try{
+     const r=await fetch('/api/auth/session',{cache:'no-store'});
+     const data=await r.json();
+     const user=data?.user||null;
+     setCloudUser(user);
+     if(user) await reconcileCloud();
+   }catch{setCloudUser(null)}
+ }
+ function rememberPreCloudBackup(){
+   if(localStorage.getItem('chathub-precloud-backup-v1'))return;
+   localStorage.setItem('chathub-precloud-backup-v1',JSON.stringify({version:1,createdAt:new Date().toISOString(),projects,chats,topics,importLogs}));
+ }
+ async function reconcileCloud(){
+   setCloudBusy(true);
+   try{
+     const r=await fetch('/api/cloud/sync',{cache:'no-store'});
+     if(r.status===401){setCloudUser(null);return}
+     if(!r.ok)throw new Error('sync read failed');
+     const data=await r.json();
+     const hasCloud=(data.projects?.length||0)+(data.chats?.length||0)+(data.topics?.length||0)+(data.importLogs?.length||0)>0;
+     if(hasCloud){
+       rememberPreCloudBackup();
+       setProjects(data.projects||starter);setChats(data.chats||[]);setTopics(data.topics||[]);setImportLogs(data.importLogs||[]);
+       if(data.lastSyncAt){setLastCloudSync(data.lastSyncAt);localStorage.setItem('chathub-last-cloud-sync-v1',data.lastSyncAt)}
+     }else{
+       await pushCloud(true);
+     }
+   }catch{flash('Felhőszinkron most nem érhető el')}
+   finally{setCloudBusy(false)}
+ }
+ async function pushCloud(showToast=true){
+   if(!cloudUser)return;
+   setCloudBusy(true);
+   try{
+     rememberPreCloudBackup();
+     const r=await fetch('/api/cloud/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+       projects,chats,topics,importLogs,device:navigator.userAgent.slice(0,180)
+     })});
+     if(r.status===401){setCloudUser(null);return}
+     if(!r.ok)throw new Error('sync write failed');
+     const data=await r.json();
+     const stamp=data.lastSyncAt||new Date().toISOString();
+     setLastCloudSync(stamp);localStorage.setItem('chathub-last-cloud-sync-v1',stamp);
+     if(showToast)flash('Felhőszinkron kész');
+   }catch{if(showToast)flash('A felhőmentés nem sikerült')}
+   finally{setCloudBusy(false)}
+ }
+ async function authSubmit(){
+   if(!authEmail.trim()||authPassword.length<8){flash('Adj meg e-mailt és legalább 8 karakteres jelszót');return}
+   setCloudBusy(true);
+   try{
+     const endpoint=authMode==='signup'?'/api/auth/signup':'/api/auth/signin';
+     const r=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(authMode==='signup'?{name:authName.trim()||'Sándor',email:authEmail.trim(),password:authPassword}:{email:authEmail.trim(),password:authPassword})});
+     const data=await r.json().catch(()=>({}));
+     if(!r.ok)throw new Error(data?.message||data?.error||'Belépési hiba');
+     setAuthPassword('');flash(authMode==='signup'?'Fiók elkészült':'Belépve');
+     await refreshCloudSession();
+   }catch(e){flash(e instanceof Error?e.message:'Belépési hiba')}
+   finally{setCloudBusy(false)}
+ }
+ async function signOutCloud(){
+   setCloudBusy(true);
+   try{await fetch('/api/auth/signout',{method:'POST'});}finally{setCloudUser(null);setCloudBusy(false);flash('Kijelentkeztél')}
  }
 
  const visible=useMemo(()=>projects.map(p=>({
@@ -389,7 +470,7 @@ export default function Home(){
    }
  }
  function assignChat(chatId:string,projectId:string){
-   setChats(cs=>cs.map(c=>c.id===chatId?{...c,assignedProjectId:projectId||undefined,topicId:projectId?c.topicId:undefined}:c));
+   setChats(cs=>cs.map(c=>c.id===chatId?{...c,assignedProjectId:projectId||undefined,topicId:projectId&&projectId===c.assignedProjectId?c.topicId:undefined}:c));
  }
  function acceptSuggestion(chatId:string){
    const chat=chats.find(c=>c.id===chatId);if(!chat)return;
@@ -412,7 +493,7 @@ export default function Home(){
  function assignCluster(ids:string[],projectId:string){
    if(!projectId)return;
    const set=new Set(ids);
-   setChats(cs=>cs.map(c=>set.has(c.id)?{...c,assignedProjectId:projectId}:c));
+   setChats(cs=>cs.map(c=>set.has(c.id)?{...c,assignedProjectId:projectId,topicId:c.assignedProjectId===projectId?c.topicId:undefined}:c));
    flash(ids.length+' chat a projekthez rendelve');
  }
  function makeTopic(projectId:string,label:string,ids:string[]){
@@ -492,7 +573,7 @@ export default function Home(){
        <button className={showChats&&inboxMode?'on':''} onClick={()=>{setShowChats(true);setClusterMode(false);setInboxMode(true)}}>Beérkező {inboxCount?'('+inboxCount+')':''}</button>
        <button className={showChats&&clusterMode?'on':''} onClick={()=>{setShowChats(true);setClusterMode(true);setInboxMode(false)}}>Rendetlenség</button>
      </nav>
-     <div className="tools"><button className={'cloudTop '+(cloudStatus?.connected?'ready':'')} onClick={()=>{setShowCloud(true);void refreshCloudStatus()}} title="Felhőszinkron">{cloudLoading?'…':cloudStatus?.connected?'☁✓':'☁'}</button><button>⚙</button><i/></div>
+     <div className="tools"><button className={'cloudTop '+(cloudStatus?.connected?'ready':'')} onClick={()=>{setShowCloud(true);void refreshCloudStatus()}} title="Felhőszinkron">{cloudLoading||cloudBusy?'…':cloudUser&&lastCloudSync?'☁✓':cloudStatus?.connected?'☁':'☁'}</button><button>⚙</button><i/></div>
    </header>
 
    {!showChats ? <>
@@ -616,14 +697,21 @@ export default function Home(){
 
    {showCloud&&<div className="overlay" onClick={()=>setShowCloud(false)}><section className="composer cloudModal" onClick={e=>e.stopPropagation()}>
       <div className="bigIco">☁</div><h2>ChatHub felhő</h2>
-      <p>A Neon lesz a közös adatbázisod, hogy később ugyanazt a rendszerezést lásd iPhone-on, iPaden és Macen is.</p>
+      <p>Neon Postgres + Neon Auth. Ugyanaz a rendezés használható iPhone-on, iPaden és Macen.</p>
       <div className="cloudSteps">
         <div className={cloudStatus?.connected?'done':'wait'}><i>{cloudStatus?.connected?'✓':'1'}</i><span><b>Neon adatbázis</b><small>{cloudLoading?'Ellenőrzés…':cloudStatus?.connected?'Kapcsolódva · adatbázisséma kész':cloudStatus?.error||'Még nincs kapcsolat'}</small></span></div>
-        <div className={cloudStatus?.authConfigured?'done':'wait'}><i>{cloudStatus?.authConfigured?'✓':'2'}</i><span><b>Neon Auth</b><small>{cloudStatus?.authConfigured?'Belépés konfigurálva':'Következő lépés: biztonságos belépés bekötése'}</small></span></div>
-        <div className={cloudStatus?.connected&&cloudStatus?.authConfigured?'done':'wait'}><i>{cloudStatus?.connected&&cloudStatus?.authConfigured?'✓':'3'}</i><span><b>Többeszközös szinkron</b><small>{cloudStatus?.connected&&cloudStatus?.authConfigured?'Indítható':'Az Auth után aktiválható'}</small></span></div>
+        <div className={cloudUser?'done':'wait'}><i>{cloudUser?'✓':'2'}</i><span><b>Biztonságos belépés</b><small>{cloudUser?(cloudUser.email||cloudUser.name||'Belépve'):(cloudStatus?.authConfigured?'Neon Auth készen áll':'Neon Auth ellenőrzése szükséges')}</small></span></div>
+        <div className={cloudUser&&lastCloudSync?'done':'wait'}><i>{cloudUser&&lastCloudSync?'✓':'3'}</i><span><b>Többeszközös szinkron</b><small>{cloudBusy?'Szinkronizálás…':lastCloudSync?'Utolsó mentés: '+niceDate(lastCloudSync):'Belépés után automatikusan indul'}</small></span></div>
       </div>
-      <div className="cloudLocal"><span>Helyi adatok</span><b>{projects.length} projekt · {chats.length} chat · {topics.length} téma</b><small>Ezeket nem törlöm. Az első felhőszinkron előtt helyi biztonsági másolat marad.</small></div>
-      <div className="composerBtns"><button className="soft" onClick={()=>void refreshCloudStatus()}>↻ Ellenőrzés</button><button className="primary" onClick={()=>setShowCloud(false)}>Rendben</button></div>
+      {!cloudUser?<div className="cloudAuth">
+        <div className="authTabs"><button className={authMode==='signin'?'on':''} onClick={()=>setAuthMode('signin')}>Belépés</button><button className={authMode==='signup'?'on':''} onClick={()=>setAuthMode('signup')}>Első fiók létrehozása</button></div>
+        {authMode==='signup'&&<input value={authName} onChange={e=>setAuthName(e.target.value)} placeholder="Név"/>}
+        <input type="email" value={authEmail} onChange={e=>setAuthEmail(e.target.value)} placeholder="E-mail"/>
+        <input type="password" value={authPassword} onChange={e=>setAuthPassword(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')void authSubmit()}} placeholder="Jelszó · minimum 8 karakter"/>
+        <button className="primary" disabled={cloudBusy||!cloudStatus?.connected} onClick={()=>void authSubmit()}>{cloudBusy?'Dolgozom…':authMode==='signup'?'Fiók létrehozása és szinkron':'Belépés és szinkron'}</button>
+      </div>:<div className="cloudAccount"><div><small>BELÉPVE</small><b>{cloudUser.email||cloudUser.name||cloudUser.id}</b><span>{lastCloudSync?'A helyi és felhőadatok össze vannak kötve.':'Az első felhőmentés előkészítve.'}</span></div><div><button className="soft" disabled={cloudBusy} onClick={()=>void reconcileCloud()}>↓ Felhőből frissítés</button><button className="primary" disabled={cloudBusy} onClick={()=>void pushCloud(true)}>↑ Mentés most</button></div></div>}
+      <div className="cloudLocal"><span>Helyi adatok</span><b>{projects.length} projekt · {chats.length} chat · {topics.length} téma</b><small>Az első felhőszinkron előtt automatikus helyi biztonsági másolat készül. Nem törlöm a jelenlegi adataidat.</small></div>
+      <div className="composerBtns">{cloudUser&&<button className="soft" onClick={()=>void signOutCloud()}>Kijelentkezés</button>}<button className="soft" onClick={()=>{void refreshCloudStatus();void refreshCloudSession()}}>↻ Ellenőrzés</button><button className="primary" onClick={()=>setShowCloud(false)}>Rendben</button></div>
    </section></div>}
 
    {showImport&&<div className="overlay" onClick={()=>setShowImport(false)}><section className="composer importModal" onClick={e=>e.stopPropagation()}>

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { ensureChatHubSchema, getSql } from '../../../../lib/neon';
+import { authBaseUrl } from '../../../../lib/auth-server';
 
 export const dynamic='force-dynamic';
 
@@ -11,7 +12,7 @@ export async function GET(){
     return NextResponse.json({
       connected:true,
       schemaReady:true,
-      authConfigured:Boolean(process.env.NEON_AUTH_BASE_URL),
+      authConfigured:Boolean(authBaseUrl()),
       database:rows[0]?.database||'Neon Postgres',
       version:rows[0]?.version
     },{headers:{'Cache-Control':'no-store'}});
@@ -19,7 +20,7 @@ export async function GET(){
     return NextResponse.json({
       connected:false,
       schemaReady:false,
-      authConfigured:Boolean(process.env.NEON_AUTH_BASE_URL),
+      authConfigured:Boolean(authBaseUrl()),
       database:'Neon',
       error:e instanceof Error?e.message:'Ismeretlen kapcsolódási hiba'
     },{status:503,headers:{'Cache-Control':'no-store'}});
