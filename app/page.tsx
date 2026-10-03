@@ -14,6 +14,7 @@ type ChatItem={
 };
 type Topic={id:string;projectId:string;name:string;createdAt:string};
 type ImportLog={id:string;date:string;fileName:string;total:number;added:number;updated:number;unchanged:number;assigned:number};
+type CloudStatus={connected:boolean;authConfigured:boolean;database:string;region?:string;schemaReady?:boolean;error?:string};
 
 const starter:Project[]=[
 {id:'ertesites',name:'Értesítési Központ',category:'APP FEJLESZTÉS',chats:16,accent:'blue',status:'Aktív',summary:'Gmail, Messenger, iMessage és naptárkapcsolatok.',next:'iMessage + sebesség',last:'Ma',tags:['Gmail','Messenger','Naptár'],favorite:true},
@@ -184,8 +185,22 @@ function makeClusters(chats:ChatItem[]){
   return out.sort((a,b)=>b.items.length-a.items.length);
 }
 
+function parseChatDate(v:any){
+  if(v===null||v===undefined||v==='')return new Date().toISOString();
+  if(typeof v==='number'){
+    const ms=v<1e12?v*1000:v;
+    const d=new Date(ms);return Number.isNaN(d.getTime())?new Date().toISOString():d.toISOString();
+  }
+  const numeric=Number(v);
+  if(typeof v==='string'&&v.trim()!==''&&Number.isFinite(numeric)){
+    const ms=numeric<1e12?numeric*1000:numeric;
+    const d=new Date(ms);return Number.isNaN(d.getTime())?new Date().toISOString():d.toISOString();
+  }
+  const ms=Date.parse(String(v));
+  return Number.isNaN(ms)?new Date().toISOString():new Date(ms).toISOString();
+}
 function niceDate(v:any){
-  const n=typeof v==='number'?v*1000:Date.parse(v);
+  const n=typeof v==='number'?(v<1e12?v*1000:v):Date.parse(v);
   if(!n||Number.isNaN(n))return '—';
   return new Intl.DateTimeFormat('hu-HU',{year:'numeric',month:'short',day:'numeric'}).format(new Date(n));
 }
@@ -241,6 +256,9 @@ export default function Home(){
  const [selectedChatIds,setSelectedChatIds]=useState<string[]>([]);
  const [showArchived,setShowArchived]=useState(false);
  const [showProjectArchive,setShowProjectArchive]=useState(false);
+ const [showCloud,setShowCloud]=useState(false);
+ const [cloudStatus,setCloudStatus]=useState<CloudStatus|null>(null);
+ const [cloudLoading,setCloudLoading]=useState(false);
  const [importLogs,setImportLogs]=useState<ImportLog[]>([]);
  const [importSummary,setImportSummary]=useState<{total:number;added:number;updated:number;unchanged:number;assigned:number}|null>(null);
  const fileRef=useRef<HTMLInputElement>(null);
@@ -260,6 +278,16 @@ export default function Home(){
  useEffect(()=>{localStorage.setItem('chathub-chats-v2',JSON.stringify(chats))},[chats]);
  useEffect(()=>{localStorage.setItem('chathub-topics-v1',JSON.stringify(topics))},[topics]);
  useEffect(()=>{localStorage.setItem('chathub-import-log-v1',JSON.stringify(importLogs))},[importLogs]);
+ useEffect(()=>{void refreshCloudStatus()},[]);
+ async function refreshCloudStatus(){
+   setCloudLoading(true);
+   try{
+     const r=await fetch('/api/cloud/status',{cache:'no-store'});
+     const data=await r.json();
+     setCloudStatus(data);
+   }catch{setCloudStatus({connected:false,authConfigured:false,database:'Neon',error:'Kapcsolódási hiba'})}
+   finally{setCloudLoading(false)}
+ }
 
  const visible=useMemo(()=>projects.map(p=>({
    p,score:fuzzyScore(query,p.name+' '+p.category+' '+p.summary+' '+p.tags.join(' '))
@@ -328,7 +356,7 @@ export default function Home(){
        const autoProject=old?.assignedProjectId||inferProject(title,searchText||preview,projects);
        const fresh:ChatItem={
          id,title,preview,searchText,
-         updated:new Date((c?.update_time||c?.create_time||0)*1000||Date.now()).toISOString(),
+         updated:parseChatDate(c?.update_time||c?.create_time),
          source:'import',assignedProjectId:autoProject,projectRef:c?.project_id||old?.projectRef||null,
          topicId:old?.topicId,archived:old?.archived
        };
@@ -464,7 +492,7 @@ export default function Home(){
        <button className={showChats&&inboxMode?'on':''} onClick={()=>{setShowChats(true);setClusterMode(false);setInboxMode(true)}}>Beérkező {inboxCount?'('+inboxCount+')':''}</button>
        <button className={showChats&&clusterMode?'on':''} onClick={()=>{setShowChats(true);setClusterMode(true);setInboxMode(false)}}>Rendetlenség</button>
      </nav>
-     <div className="tools"><button>◌</button><button>⚙</button><i/></div>
+     <div className="tools"><button className={'cloudTop '+(cloudStatus?.connected?'ready':'')} onClick={()=>{setShowCloud(true);void refreshCloudStatus()}} title="Felhőszinkron">{cloudLoading?'…':cloudStatus?.connected?'☁✓':'☁'}</button><button>⚙</button><i/></div>
    </header>
 
    {!showChats ? <>
@@ -584,6 +612,18 @@ export default function Home(){
       <p>{composer==='project'?'Adj nevet a projektnek. Később kategóriát, linkeket és beszélgetéseket rendelhetsz hozzá.':'Adj rövid címet a beszélgetésnek. Ha projektből indítottad, automatikusan oda kerül.'}</p>
       <input autoFocus value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')create()}} placeholder={composer==='project'?'Például: Matematika':'Például: Valószínűség feladatok'}/>
       <div className="composerBtns"><button className="soft" onClick={()=>setComposer(null)}>Mégse</button><button className="primary" onClick={create}>Létrehozás</button></div>
+   </section></div>}
+
+   {showCloud&&<div className="overlay" onClick={()=>setShowCloud(false)}><section className="composer cloudModal" onClick={e=>e.stopPropagation()}>
+      <div className="bigIco">☁</div><h2>ChatHub felhő</h2>
+      <p>A Neon lesz a közös adatbázisod, hogy később ugyanazt a rendszerezést lásd iPhone-on, iPaden és Macen is.</p>
+      <div className="cloudSteps">
+        <div className={cloudStatus?.connected?'done':'wait'}><i>{cloudStatus?.connected?'✓':'1'}</i><span><b>Neon adatbázis</b><small>{cloudLoading?'Ellenőrzés…':cloudStatus?.connected?'Kapcsolódva · adatbázisséma kész':cloudStatus?.error||'Még nincs kapcsolat'}</small></span></div>
+        <div className={cloudStatus?.authConfigured?'done':'wait'}><i>{cloudStatus?.authConfigured?'✓':'2'}</i><span><b>Neon Auth</b><small>{cloudStatus?.authConfigured?'Belépés konfigurálva':'Következő lépés: biztonságos belépés bekötése'}</small></span></div>
+        <div className={cloudStatus?.connected&&cloudStatus?.authConfigured?'done':'wait'}><i>{cloudStatus?.connected&&cloudStatus?.authConfigured?'✓':'3'}</i><span><b>Többeszközös szinkron</b><small>{cloudStatus?.connected&&cloudStatus?.authConfigured?'Indítható':'Az Auth után aktiválható'}</small></span></div>
+      </div>
+      <div className="cloudLocal"><span>Helyi adatok</span><b>{projects.length} projekt · {chats.length} chat · {topics.length} téma</b><small>Ezeket nem törlöm. Az első felhőszinkron előtt helyi biztonsági másolat marad.</small></div>
+      <div className="composerBtns"><button className="soft" onClick={()=>void refreshCloudStatus()}>↻ Ellenőrzés</button><button className="primary" onClick={()=>setShowCloud(false)}>Rendben</button></div>
    </section></div>}
 
    {showImport&&<div className="overlay" onClick={()=>setShowImport(false)}><section className="composer importModal" onClick={e=>e.stopPropagation()}>
