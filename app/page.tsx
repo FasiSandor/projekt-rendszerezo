@@ -1,6 +1,7 @@
 'use client';
 
 import {ChangeEvent,useEffect,useMemo,useRef,useState} from 'react';
+import {authClient} from '../lib/auth/client';
 
 type Accent='cyan'|'violet'|'pink'|'orange'|'green'|'blue';
 type Project={
@@ -266,6 +267,7 @@ export default function Home(){
  const [authPassword,setAuthPassword]=useState('');
  const [authName,setAuthName]=useState('Sándor');
  const [cloudBusy,setCloudBusy]=useState(false);
+ const [cloudNotice,setCloudNotice]=useState<{kind:'ok'|'error'|'info';text:string}|null>(null);
  const [lastCloudSync,setLastCloudSync]=useState('');
  const [hydrated,setHydrated]=useState(false);
  const [importLogs,setImportLogs]=useState<ImportLog[]>([]);
@@ -306,9 +308,8 @@ export default function Home(){
  }
  async function refreshCloudSession(){
    try{
-     const r=await fetch('/api/auth/session',{cache:'no-store'});
-     const data=await r.json();
-     const user=data?.user||null;
+     const result:any=await authClient.getSession();
+     const user=result?.data?.user||null;
      setCloudUser(user);
      if(user) await reconcileCloud();
    }catch{setCloudUser(null)}
@@ -353,21 +354,40 @@ export default function Home(){
    finally{setCloudBusy(false)}
  }
  async function authSubmit(){
-   if(!authEmail.trim()||authPassword.length<8){flash('Adj meg e-mailt és legalább 8 karakteres jelszót');return}
-   setCloudBusy(true);
+   if(!authEmail.trim()||authPassword.length<8){
+     setCloudNotice({kind:'error',text:'Adj meg érvényes e-mail címet és legalább 8 karakteres jelszót.'});return
+   }
+   if(!cloudStatus?.authConfigured){
+     setCloudNotice({kind:'error',text:'A Neon Auth szerveroldali kulcsa még nincs beállítva a Vercelben.'});return
+   }
+   setCloudBusy(true);setCloudNotice({kind:'info',text:authMode==='signup'?'Fiók létrehozása folyamatban…':'Belépés folyamatban…'});
    try{
-     const endpoint=authMode==='signup'?'/api/auth/signup':'/api/auth/signin';
-     const r=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(authMode==='signup'?{name:authName.trim()||'Sándor',email:authEmail.trim(),password:authPassword}:{email:authEmail.trim(),password:authPassword})});
-     const data=await r.json().catch(()=>({}));
-     if(!r.ok)throw new Error(data?.message||data?.error||'Belépési hiba');
-     setAuthPassword('');flash(authMode==='signup'?'Fiók elkészült':'Belépve');
-     await refreshCloudSession();
-   }catch(e){flash(e instanceof Error?e.message:'Belépési hiba')}
-   finally{setCloudBusy(false)}
+     const result:any=authMode==='signup'
+       ?await authClient.signUp.email({name:authName.trim()||'Sándor',email:authEmail.trim(),password:authPassword})
+       :await authClient.signIn.email({email:authEmail.trim(),password:authPassword});
+     if(result?.error)throw new Error(result.error.message||result.error.statusText||'Belépési hiba');
+     setAuthPassword('');
+     const session:any=await authClient.getSession();
+     const user=session?.data?.user||result?.data?.user||null;
+     if(user){
+       setCloudUser(user);
+       setCloudNotice({kind:'ok',text:authMode==='signup'?'A fiók elkészült. Indítom az első felhőszinkront.':'Sikeres belépés. Szinkronizálok.'});
+       await reconcileCloud();
+     }else{
+       setCloudNotice({kind:'info',text:'A kérés sikerült, de még nincs aktív munkamenet. Ha a Neon e-mail-ellenőrzést kér, ellenőrizd a postaládádat, majd lépj be.'});
+     }
+   }catch(e){
+     setCloudNotice({kind:'error',text:e instanceof Error?e.message:'Ismeretlen Neon Auth hiba'});
+   }finally{setCloudBusy(false)}
  }
  async function signOutCloud(){
    setCloudBusy(true);
-   try{await fetch('/api/auth/signout',{method:'POST'});}finally{setCloudUser(null);setCloudBusy(false);flash('Kijelentkeztél')}
+   try{
+     const result:any=await authClient.signOut();
+     if(result?.error)throw new Error(result.error.message||'Kijelentkezési hiba');
+     setCloudUser(null);setCloudNotice({kind:'ok',text:'Kijelentkeztél a ChatHub felhőből.'});
+   }catch(e){setCloudNotice({kind:'error',text:e instanceof Error?e.message:'Kijelentkezési hiba'})}
+   finally{setCloudBusy(false)}
  }
 
  const visible=useMemo(()=>projects.map(p=>({
@@ -703,12 +723,13 @@ export default function Home(){
         <div className={cloudUser?'done':'wait'}><i>{cloudUser?'✓':'2'}</i><span><b>Biztonságos belépés</b><small>{cloudUser?(cloudUser.email||cloudUser.name||'Belépve'):(cloudStatus?.authConfigured?'Neon Auth készen áll':'Neon Auth ellenőrzése szükséges')}</small></span></div>
         <div className={cloudUser&&lastCloudSync?'done':'wait'}><i>{cloudUser&&lastCloudSync?'✓':'3'}</i><span><b>Többeszközös szinkron</b><small>{cloudBusy?'Szinkronizálás…':lastCloudSync?'Utolsó mentés: '+niceDate(lastCloudSync):'Belépés után automatikusan indul'}</small></span></div>
       </div>
+      {cloudNotice&&<div className={'cloudNotice '+cloudNotice.kind}><span>{cloudNotice.kind==='error'?'!':cloudNotice.kind==='ok'?'✓':'i'}</span><b>{cloudNotice.text}</b><button onClick={()=>setCloudNotice(null)}>×</button></div>}
       {!cloudUser?<div className="cloudAuth">
         <div className="authTabs"><button className={authMode==='signin'?'on':''} onClick={()=>setAuthMode('signin')}>Belépés</button><button className={authMode==='signup'?'on':''} onClick={()=>setAuthMode('signup')}>Első fiók létrehozása</button></div>
         {authMode==='signup'&&<input value={authName} onChange={e=>setAuthName(e.target.value)} placeholder="Név"/>}
         <input type="email" value={authEmail} onChange={e=>setAuthEmail(e.target.value)} placeholder="E-mail"/>
         <input type="password" value={authPassword} onChange={e=>setAuthPassword(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')void authSubmit()}} placeholder="Jelszó · minimum 8 karakter"/>
-        <button className="primary" disabled={cloudBusy||!cloudStatus?.connected} onClick={()=>void authSubmit()}>{cloudBusy?'Dolgozom…':authMode==='signup'?'Fiók létrehozása és szinkron':'Belépés és szinkron'}</button>
+        <button className="primary" disabled={cloudBusy||!cloudStatus?.connected||!cloudStatus?.authConfigured} onClick={()=>void authSubmit()}>{cloudBusy?'Dolgozom…':!cloudStatus?.authConfigured?'Auth beállítás szükséges':authMode==='signup'?'Fiók létrehozása és szinkron':'Belépés és szinkron'}</button>
       </div>:<div className="cloudAccount"><div><small>BELÉPVE</small><b>{cloudUser.email||cloudUser.name||cloudUser.id}</b><span>{lastCloudSync?'A helyi és felhőadatok össze vannak kötve.':'Az első felhőmentés előkészítve.'}</span></div><div><button className="soft" disabled={cloudBusy} onClick={()=>void reconcileCloud()}>↓ Felhőből frissítés</button><button className="primary" disabled={cloudBusy} onClick={()=>void pushCloud(true)}>↑ Mentés most</button></div></div>}
       <div className="cloudLocal"><span>Helyi adatok</span><b>{projects.length} projekt · {chats.length} chat · {topics.length} téma</b><small>Az első felhőszinkron előtt automatikus helyi biztonsági másolat készül. Nem törlöm a jelenlegi adataidat.</small></div>
       <div className="composerBtns">{cloudUser&&<button className="soft" onClick={()=>void signOutCloud()}>Kijelentkezés</button>}<button className="soft" onClick={()=>{void refreshCloudStatus();void refreshCloudSession()}}>↻ Ellenőrzés</button><button className="primary" onClick={()=>setShowCloud(false)}>Rendben</button></div>

@@ -1,15 +1,19 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { ensureChatHubSchema, getSql } from '../../../../lib/neon';
-import { neonSession } from '../../../../lib/auth-server';
+import {NextRequest,NextResponse} from 'next/server';
+import {ensureChatHubSchema,getSql} from '../../../../lib/neon';
+import {getAuth} from '../../../../lib/auth/server';
 
 export const dynamic='force-dynamic';
 
-function userIdOf(session:any){return session?.user?.id||session?.session?.userId||null}
+async function ownerId(){
+  try{
+    const result:any=await getAuth().getSession();
+    return result?.data?.user?.id||null;
+  }catch{return null}
+}
 function safeArray(v:any){return Array.isArray(v)?v:[]}
 
-export async function GET(request:NextRequest){
-  const session=await neonSession(request);
-  const owner=userIdOf(session);
+export async function GET(){
+  const owner=await ownerId();
   if(!owner)return NextResponse.json({error:'unauthorized'},{status:401});
   await ensureChatHubSchema();
   const sql=getSql();
@@ -28,8 +32,7 @@ export async function GET(request:NextRequest){
 }
 
 export async function POST(request:NextRequest){
-  const session=await neonSession(request);
-  const owner=userIdOf(session);
+  const owner=await ownerId();
   if(!owner)return NextResponse.json({error:'unauthorized'},{status:401});
   const body=await request.json();
   const projects=safeArray(body.projects),chats=safeArray(body.chats),topics=safeArray(body.topics),importLogs=safeArray(body.importLogs).slice(0,20);
@@ -40,6 +43,6 @@ export async function POST(request:NextRequest){
   await sql`with d as (delete from chathub_chats where owner_id=${owner}) insert into chathub_chats(owner_id,id,data,updated_at) select ${owner},x->>'id',x,now() from jsonb_array_elements(${JSON.stringify(chats)}::jsonb) x`;
   await sql`with d as (delete from chathub_topics where owner_id=${owner}) insert into chathub_topics(owner_id,id,data,updated_at) select ${owner},x->>'id',x,now() from jsonb_array_elements(${JSON.stringify(topics)}::jsonb) x`;
   await sql`with d as (delete from chathub_import_logs where owner_id=${owner}) insert into chathub_import_logs(owner_id,id,data,updated_at) select ${owner},x->>'id',x,now() from jsonb_array_elements(${JSON.stringify(importLogs)}::jsonb) x`;
-  const state=await sql`insert into chathub_sync_state(owner_id,last_sync_at,last_device,schema_version) values(${owner},now(),${String(body.device||'').slice(0,180)},1) on conflict(owner_id) do update set last_sync_at=excluded.last_sync_at,last_device=excluded.last_device,schema_version=excluded.schema_version returning last_sync_at`;
+  const state=await sql`insert into chathub_sync_state(owner_id,last_sync_at,last_device,schema_version) values(${owner},now(),${String(body.device||'').slice(0,180)},2) on conflict(owner_id) do update set last_sync_at=excluded.last_sync_at,last_device=excluded.last_device,schema_version=excluded.schema_version returning last_sync_at`;
   return NextResponse.json({ok:true,lastSyncAt:state[0]?.last_sync_at});
 }

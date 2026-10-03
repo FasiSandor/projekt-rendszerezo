@@ -1,19 +1,16 @@
 # ChatHub cloud sync
 
-Architecture: GitHub → Vercel → Neon Postgres + Neon Auth.
+Production architecture: GitHub → Vercel → Neon Postgres + Managed Better Auth.
 
-- `DATABASE_URL` is server-only.
-- Neon Auth is proxied through same-origin Next.js API routes.
-- Cloud CRUD is available only after a valid Neon Auth session.
-- `owner_id` is always derived server-side from the authenticated session, never accepted from the client.
-- Before first cloud reconciliation the browser stores `chathub-precloud-backup-v1`.
-- LocalStorage remains an offline/local safety copy.
-- After login, an empty cloud is seeded from local data; a non-empty cloud becomes the authoritative snapshot for that user.
-- Changes are debounced and saved after 2.2 seconds; manual upload/download buttons are available in the cloud dialog.
+Authentication uses Neon's official Next.js SDK (`@neondatabase/auth`), not a custom REST proxy.
 
-Public Neon Auth endpoint fallback:
-`https://ep-lively-night-b258ug4c.neonauth.eu-central-1.aws.neon.tech/neondb/auth`
+Required server secret:
+- `DATABASE_URL`
+- `NEON_AUTH_COOKIE_SECRET` (32+ random characters)
 
-Preferred production setup: define `NEON_AUTH_BASE_URL` in Vercel with the production branch Auth URL. The fallback is public configuration, not a credential.
+Optional public config:
+- `NEON_AUTH_BASE_URL`; if absent, the production branch Auth URL is used.
 
-The Neon Console must trust the production origin `https://projekt-rendszerezo.vercel.app`.
+The browser uses `@neondatabase/auth/next` and the server exposes the official catch-all auth handler at `/api/auth/[...path]`.
+Cloud sync derives `owner_id` exclusively from the authenticated server session.
+Auth errors remain visible in the cloud dialog until the user closes them.
