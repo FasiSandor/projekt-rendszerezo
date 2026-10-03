@@ -116,6 +116,54 @@ function fuzzyScore(q:string,text:string){
   }
   return score;
 }
+const stopWords=new Set(['hogy','vagy','volt','van','egy','az','es','is','de','meg','majd','kell','ezt','azt','itt','ott','nem','igen','ami','ahol','amikor','lesz','lett','csak','mar','mert','mint','ilyen','olyan','szerintem','akkor','most','ennek','annak','the','and','for','with','from','this','that']);
+
+function chatKeywords(c:ChatItem){
+  const raw=normalizeText(c.title+' '+c.preview+' '+(c.searchText||''));
+  const words=raw.split(' ').filter(w=>w.length>=4&&!stopWords.has(w));
+  const freq=new Map<string,number>();
+  for(const w of words)freq.set(w,(freq.get(w)||0)+1);
+  return [...freq.entries()].sort((a,b)=>b[1]-a[1]).slice(0,16).map(x=>x[0]);
+}
+function similarity(a:ChatItem,b:ChatItem){
+  if(a.assignedProjectId&&b.assignedProjectId&&a.assignedProjectId!==b.assignedProjectId)return 0;
+  const A=new Set(chatKeywords(a)),B=new Set(chatKeywords(b));
+  if(!A.size||!B.size)return 0;
+  let common=0;for(const x of A)if(B.has(x))common++;
+  const union=new Set([...A,...B]).size;
+  let score=common/union;
+  const ta=normalizeText(a.title),tb=normalizeText(b.title);
+  if(ta&&tb&&(ta.includes(tb)||tb.includes(ta)))score+=.35;
+  for(const group of conceptGroups){
+    const ah=group.some(x=>normalizeText(a.title+' '+a.preview).includes(x));
+    const bh=group.some(x=>normalizeText(b.title+' '+b.preview).includes(x));
+    if(ah&&bh){score+=.22;break}
+  }
+  return score;
+}
+function makeClusters(chats:ChatItem[]){
+  const pool=[...chats].sort((a,b)=>b.updated.localeCompare(a.updated));
+  const used=new Set<string>();
+  const out:{id:string;label:string;items:ChatItem[];confidence:number;projectId?:string}[]=[];
+  for(const seed of pool){
+    if(used.has(seed.id))continue;
+    const candidates=pool.filter(c=>c.id!==seed.id&&!used.has(c.id))
+      .map(c=>({c,score:similarity(seed,c)})).filter(x=>x.score>=.18)
+      .sort((a,b)=>b.score-a.score).slice(0,9);
+    if(!candidates.length)continue;
+    const items=[seed,...candidates.map(x=>x.c)];
+    items.forEach(c=>used.add(c.id));
+    const freq=new Map<string,number>();
+    items.forEach(c=>chatKeywords(c).slice(0,8).forEach(w=>freq.set(w,(freq.get(w)||0)+1)));
+    const top=[...freq.entries()].sort((a,b)=>b[1]-a[1]).filter(x=>x[1]>=2).slice(0,3).map(x=>x[0]);
+    const projectIds=items.map(x=>x.assignedProjectId).filter(Boolean) as string[];
+    const projectId=projectIds.length?projectIds.sort((a,b)=>projectIds.filter(x=>x===b).length-projectIds.filter(x=>x===a).length)[0]:undefined;
+    const confidence=Math.min(98,Math.round((candidates.reduce((a,x)=>a+x.score,0)/candidates.length)*100+45));
+    out.push({id:seed.id,label:top.join(' · ')||seed.title,items,confidence,projectId});
+  }
+  return out.sort((a,b)=>b.items.length-a.items.length);
+}
+
 function niceDate(v:any){
   const n=typeof v==='number'?v*1000:Date.parse(v);
   if(!n||Number.isNaN(n))return '—';
@@ -150,6 +198,7 @@ export default function Home(){
  const [toast,setToast]=useState('');
  const [showImport,setShowImport]=useState(false);
  const [showChats,setShowChats]=useState(false);
+ const [clusterMode,setClusterMode]=useState(false);
  const [importSummary,setImportSummary]=useState<{total:number;assigned:number}|null>(null);
  const fileRef=useRef<HTMLInputElement>(null);
 
@@ -171,6 +220,8 @@ export default function Home(){
    if(filter==='Legutóbbi'&&!(p.last==='Ma'||p.last==='Tegnap'))return false;
    return true;
  }).sort((a,b)=>query.trim()?b.score-a.score:0).map(x=>x.p),[projects,query,filter]);
+
+ const clusters=useMemo(()=>makeClusters(chats),[chats]);
 
  const chatResults=useMemo(()=>chats.map(c=>({
    c,score:fuzzyScore(query,c.title+' '+c.preview+' '+(c.searchText||''))
@@ -232,6 +283,12 @@ export default function Home(){
  function assignChat(chatId:string,projectId:string){
    setChats(cs=>cs.map(c=>c.id===chatId?{...c,assignedProjectId:projectId||undefined}:c));
  }
+ function assignCluster(ids:string[],projectId:string){
+   if(!projectId)return;
+   const set=new Set(ids);
+   setChats(cs=>cs.map(c=>set.has(c.id)?{...c,assignedProjectId:projectId}:c));
+   flash(ids.length+' chat a projekthez rendelve');
+ }
  const selectedChats=selected?chats.filter(c=>c.assignedProjectId===selected.id):[];
 
  return <main className="shell">
@@ -240,11 +297,11 @@ export default function Home(){
    <header className="top">
      <div className="brand"><img src="/icon.svg" alt="ChatHub"/><b>Chat<span>Hub</span></b></div>
      <nav>
-       <button className={!showChats?'on':''} onClick={()=>setShowChats(false)}>⌂ Kezdőlap</button>
-       <button onClick={()=>setShowChats(false)}>Projektek</button>
-       <button className={showChats?'on':''} onClick={()=>setShowChats(true)}>Chatek</button>
+       <button className={!showChats?'on':''} onClick={()=>{setShowChats(false);setClusterMode(false)}}>⌂ Kezdőlap</button>
+       <button onClick={()=>{setShowChats(false);setClusterMode(false)}}>Projektek</button>
+       <button className={showChats&&!clusterMode?'on':''} onClick={()=>{setShowChats(true);setClusterMode(false)}}>Chatek</button>
        <button onClick={()=>setShowImport(true)}>Import</button>
-       <button>Rendetlenség</button>
+       <button className={showChats&&clusterMode?'on':''} onClick={()=>{setShowChats(true);setClusterMode(true)}}>Rendetlenség</button>
      </nav>
      <div className="tools"><button>◌</button><button>⚙</button><i/></div>
    </header>
@@ -291,30 +348,42 @@ export default function Home(){
       <div className="catTop"><i>{c[3]}</i><div><h3>{c[0]}</h3><p>{c[1]}</p></div><span>›</span></div>
    </article>)}</section>
 
-   <section className="messy"><i>✦</i><div><small>RENDETLENSÉG-FIGYELŐ</small><h3>{chats.filter(c=>!c.assignedProjectId).length||13} rendezetlen beszélgetés vár besorolásra</h3><p>A rendszer cím és tartalom alapján javaslatot ad a projekthez.</p></div><button onClick={()=>setShowChats(true)}>Megnézem</button></section>
+   <section className="messy"><i>✦</i><div><small>RENDETLENSÉG-FIGYELŐ</small><h3>{clusters.length?clusters.length+' hasonló beszélgetéscsoportot találtam':(chats.filter(c=>!c.assignedProjectId).length||13)+' rendezetlen beszélgetés vár besorolásra'}</h3><p>A rendszer cím, tartalom és közös kulcsszavak alapján csoportosít.</p></div><button onClick={()=>{setShowChats(true);setClusterMode(true)}}>Megnézem</button></section>
    </> : <>
     <section className="hero compactHero">
-      <div><small>✦ BESZÉLGETÉSKATALÓGUS</small><h1>Chatek</h1><p>{chats.length?chats.length+' importált vagy rögzített beszélgetés':'Még nincs importált beszélgetés.'}</p></div>
-      <div className="heroBtns"><button className="primary" onClick={()=>setShowImport(true)}>⇩ Import</button><button className="soft" onClick={()=>{setSelected(null);setComposer('chat')}}>＋ Új chat</button></div>
+      <div><small>✦ {clusterMode?'RENDETLENSÉG / KLASZTEREK':'BESZÉLGETÉSKATALÓGUS'}</small><h1>{clusterMode?'Kapcsolódó csetek':'Chatek'}</h1><p>{clusterMode?(clusters.length?clusters.length+' valószínű témacsoport':'Import után itt jelennek meg a hasonló csetek'):(chats.length?chats.length+' importált vagy rögzített beszélgetés':'Még nincs importált beszélgetés.')}</p></div>
+      <div className="heroBtns"><button className="primary" onClick={()=>setShowImport(true)}>⇩ Import</button><button className="soft" onClick={()=>setClusterMode(!clusterMode)}>{clusterMode?'□ Chatlista':'✦ Klaszterek'}</button></div>
     </section>
-    <section className="search smartSearch"><span>⌕</span><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Pl. „az a harcsás versenyfogás tejföl pöttyel”"/><kbd>{chatResults.length}</kbd></section>
-    {query.trim()&&<div className="searchHint"><b>Foszlánykeresés aktív</b><span>Nem kell pontos cím: írj le annyit, amire emlékszel.</span></div>}
-    <section className="chatList">
-      {chatResults.length===0?<div className="emptyState"><div>⇩</div><h3>Importáld a ChatGPT előzményeidet</h3><p>A ChatGPT adatexportból a <b>conversations.json</b> fájlt válaszd ki. A feldolgozás a böngésződben történik.</p><button className="primary" onClick={()=>setShowImport(true)}>Import indítása</button></div>:
-      chatResults.map(c=>{
-        const p=projects.find(p=>p.id===c.assignedProjectId);
-        return <article className="chatRow" key={c.id}>
-          <div className={'chatDot '+(p?.accent||'blue')}>•••</div>
-          <div className="chatCopy"><h3>{c.title}</h3><p>{c.preview||'Nincs rövid előnézet.'}</p><small>{niceDate(c.updated)} · {c.source==='import'?'ChatGPT export':'Kézi'}</small></div>
-          <select value={c.assignedProjectId||''} onChange={e=>assignChat(c.id,e.target.value)}>
-            <option value="">Rendezetlen</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
+    {!clusterMode?<>
+      <section className="search smartSearch"><span>⌕</span><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Pl. „az a harcsás versenyfogás tejföl pöttyel”"/><kbd>{chatResults.length}</kbd></section>
+      {query.trim()&&<div className="searchHint"><b>Foszlánykeresés aktív</b><span>Nem kell pontos cím: írj le annyit, amire emlékszel.</span></div>}
+      <section className="chatList">
+        {chatResults.length===0?<div className="emptyState"><div>⇩</div><h3>Importáld a ChatGPT előzményeidet</h3><p>A ChatGPT adatexportból a <b>conversations.json</b> fájlt válaszd ki. A feldolgozás a böngésződben történik.</p><button className="primary" onClick={()=>setShowImport(true)}>Import indítása</button></div>:
+        chatResults.map(c=>{
+          const p=projects.find(p=>p.id===c.assignedProjectId);
+          return <article className="chatRow" key={c.id}>
+            <div className={'chatDot '+(p?.accent||'blue')}>•••</div>
+            <div className="chatCopy"><h3>{c.title}</h3><p>{c.preview||'Nincs rövid előnézet.'}</p><small>{niceDate(c.updated)} · {c.source==='import'?'ChatGPT export':'Kézi'}</small></div>
+            <select value={c.assignedProjectId||''} onChange={e=>assignChat(c.id,e.target.value)}>
+              <option value="">Rendezetlen</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </article>
+        })}
+      </section>
+    </>:<section className="clusterList">
+      {clusters.length===0?<div className="emptyState"><div>✦</div><h3>Még nincs mit csoportosítani</h3><p>Importáld a ChatGPT előzményeidet. Legalább két hasonló beszélgetésnél már megjelenik egy témaklaszter.</p><button className="primary" onClick={()=>setShowImport(true)}>Import indítása</button></div>:
+      clusters.map((cl,i)=>{
+        const suggested=projects.find(p=>p.id===cl.projectId);
+        return <article className="clusterCard" key={cl.id}>
+          <div className="clusterTop"><div className="clusterNum">0{i+1}</div><div><small>VALÓSZÍNŰ TÉMACSOPORT · {cl.confidence}%</small><h3>{cl.label}</h3><p>{cl.items.length} beszélgetés kapcsolódhat egymáshoz</p></div></div>
+          <div className="clusterChats">{cl.items.slice(0,6).map(c=><div key={c.id}><span>•••</span><b>{c.title}</b><small>{niceDate(c.updated)}</small></div>)}</div>
+          <div className="clusterAction"><div><small>Javasolt projekt</small><strong>{suggested?.name||'Még nincs biztos javaslat'}</strong></div><select defaultValue={cl.projectId||''} onChange={e=>assignCluster(cl.items.map(x=>x.id),e.target.value)}><option value="">Projekt választása…</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></div>
         </article>
       })}
-    </section>
+    </section>}
    </>}
 
-   <div className="dock"><button className={!showChats?'on':''} onClick={()=>setShowChats(false)}>⌂<small>Kezdőlap</small></button><button onClick={()=>setShowChats(false)}>▱<small>Projektek</small></button><button className="plus" onClick={()=>setComposer('project')}>＋</button><button className={showChats?'on':''} onClick={()=>setShowChats(true)}>□<small>Chatek</small></button><button onClick={()=>setShowImport(true)}>⇩<small>Import</small></button></div>
+   <div className="dock"><button className={!showChats?'on':''} onClick={()=>{setShowChats(false);setClusterMode(false)}}>⌂<small>Kezdőlap</small></button><button onClick={()=>{setShowChats(false);setClusterMode(false)}}>▱<small>Projektek</small></button><button className="plus" onClick={()=>setComposer('project')}>＋</button><button className={showChats&&!clusterMode?'on':''} onClick={()=>{setShowChats(true);setClusterMode(false)}}>□<small>Chatek</small></button><button className={showChats&&clusterMode?'on':''} onClick={()=>{setShowChats(true);setClusterMode(true)}}>✦<small>Rend</small></button></div>
 
    {selected&&<div className="overlay" onClick={()=>setSelected(null)}><section className="sheet" onClick={e=>e.stopPropagation()}>
       <button className="x" onClick={()=>setSelected(null)}>×</button>
