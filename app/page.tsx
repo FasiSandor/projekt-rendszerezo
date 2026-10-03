@@ -188,6 +188,23 @@ function niceDate(v:any){
   if(!n||Number.isNaN(n))return '—';
   return new Intl.DateTimeFormat('hu-HU',{year:'numeric',month:'short',day:'numeric'}).format(new Date(n));
 }
+function suggestDestination(chat:ChatItem,projects:Project[],topics:Topic[]){
+  const hay=chat.title+' '+chat.preview+' '+(chat.searchText||'');
+  const ranked=projects.filter(p=>!p.archived).map(p=>{
+    const q=[p.name,p.category,p.summary,...p.tags].join(' ');
+    const score=fuzzyScore(q,hay)+fuzzyScore(p.name,hay)*.8;
+    return {project:p,score};
+  }).sort((a,b)=>b.score-a.score);
+  const best=ranked[0];
+  if(!best||best.score<=0)return null;
+  const confidence=Math.min(98,Math.round(42+best.score*2.5));
+  const topicRank=topics.filter(t=>t.projectId===best.project.id).map(t=>({topic:t,score:fuzzyScore(t.name,hay)})).sort((a,b)=>b.score-a.score);
+  const bestTopic=topicRank[0]?.score>0?topicRank[0]:null;
+  const topicConfidence=bestTopic?Math.min(96,Math.round(38+bestTopic.score*3)):0;
+  const reasons=[best.project.name,...best.project.tags.filter(t=>fuzzyScore(t,hay)>0).slice(0,2)];
+  return {projectId:best.project.id,projectName:best.project.name,confidence,topicId:bestTopic?.topic.id,topicName:bestTopic?.topic.name,topicConfidence,reasons:[...new Set(reasons)].slice(0,3)};
+}
+
 function inferProject(title:string,preview:string,projects:Project[]){
   const hay=(title+' '+preview).toLowerCase();
   const rules:{id:string;words:string[]}[]=[
@@ -253,6 +270,8 @@ export default function Home(){
  const clusters=useMemo(()=>makeClusters(chats.filter(c=>!c.archived)),[chats]);
  const duplicateGroups=useMemo(()=>findDuplicateGroups(chats),[chats]);
  const inboxCount=chats.filter(c=>!c.archived&&!c.assignedProjectId).length;
+ const smartSuggestions=useMemo(()=>chats.filter(c=>!c.archived&&!c.assignedProjectId).map(c=>({chat:c,s:suggestDestination(c,projects,topics)})).filter(x=>x.s).sort((a,b)=>(b.s?.confidence||0)-(a.s?.confidence||0)),[chats,projects,topics]);
+ const safeSuggestionCount=smartSuggestions.filter(x=>(x.s?.confidence||0)>=72).length;
 
  const chatResults=useMemo(()=>chats.map(c=>({
    c,score:fuzzyScore(query,c.title+' '+c.preview+' '+(c.searchText||''))
@@ -322,7 +341,25 @@ export default function Home(){
    }
  }
  function assignChat(chatId:string,projectId:string){
-   setChats(cs=>cs.map(c=>c.id===chatId?{...c,assignedProjectId:projectId||undefined}:c));
+   setChats(cs=>cs.map(c=>c.id===chatId?{...c,assignedProjectId:projectId||undefined,topicId:projectId?c.topicId:undefined}:c));
+ }
+ function acceptSuggestion(chatId:string){
+   const chat=chats.find(c=>c.id===chatId);if(!chat)return;
+   const sug=suggestDestination(chat,projects,topics);if(!sug)return;
+   setChats(cs=>cs.map(c=>c.id===chatId?{...c,assignedProjectId:sug.projectId,topicId:sug.topicConfidence>=72?sug.topicId:undefined}:c));
+   flash('Chat rendezve → '+sug.projectName);
+ }
+ function autoArrangeSafe(){
+   const suggestions=new Map<string,ReturnType<typeof suggestDestination>>();
+   chats.filter(c=>!c.archived&&!c.assignedProjectId).forEach(c=>suggestions.set(c.id,suggestDestination(c,projects,topics)));
+   let count=0;
+   setChats(cs=>cs.map(c=>{
+     const sug=suggestions.get(c.id);
+     if(!sug||sug.confidence<72)return c;
+     count++;
+     return {...c,assignedProjectId:sug.projectId,topicId:sug.topicConfidence>=78?sug.topicId:undefined};
+   }));
+   flash(count?count+' biztos találat automatikusan rendezve':'Nincs elég biztos automatikus találat');
  }
  function assignCluster(ids:string[],projectId:string){
    if(!projectId)return;
@@ -453,7 +490,7 @@ export default function Home(){
       <div className="catTop"><i>{c[3]}</i><div><h3>{c[0]}</h3><p>{c[1]}</p></div><span>›</span></div>
    </article>)}</section>
 
-   <section className="inboxCard"><i>⇥</i><div><small>BEÉRKEZŐ</small><h3>{inboxCount?inboxCount+' chat még nincs projekthez rendelve':'Minden chat a helyén van'}</h3><p>Ide kerül minden olyan beszélgetés, amelynél még nem biztos, hova tartozik.</p></div><button onClick={()=>{setShowChats(true);setClusterMode(false);setInboxMode(true)}}>Rendezem</button></section>
+   <section className="inboxCard"><i>⇥</i><div><small>BEÉRKEZŐ</small><h3>{inboxCount?inboxCount+' chat még nincs projekthez rendelve':'Minden chat a helyén van'}</h3><p>{safeSuggestionCount?safeSuggestionCount+' beszélgetésnél már elég biztos az automatikus javaslat.':'Ide kerül minden olyan beszélgetés, amelynél még nem biztos, hova tartozik.'}</p></div><div className="inboxActions">{safeSuggestionCount>0&&<button className="smartAuto" onClick={autoArrangeSafe}>✦ Biztosak rendezése ({safeSuggestionCount})</button>}<button onClick={()=>{setShowChats(true);setClusterMode(false);setInboxMode(true)}}>Rendezem</button></div></section>
    <section className="messy"><i>✦</i><div><small>RENDETLENSÉG-FIGYELŐ</small><h3>{duplicateGroups.length?duplicateGroups.length+' lehetséges duplikáció · ':''}{clusters.length?clusters.length+' hasonló témacsoport':(inboxCount||13)+' rendezetlen beszélgetés'}</h3><p>A rendszer külön jelzi a duplikációkat és a tartalmilag összetartozó chateket.</p></div><button onClick={()=>{setShowChats(true);setClusterMode(true);setInboxMode(false)}}>Megnézem</button></section>
    </> : <>
     <section className="hero compactHero">
@@ -463,17 +500,20 @@ export default function Home(){
     {!clusterMode?<>
       <section className="search smartSearch"><span>⌕</span><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Pl. „az a harcsás versenyfogás tejföl pöttyel”"/><kbd>{chatResults.length}</kbd></section>
       {query.trim()&&<div className="searchHint"><b>Foszlánykeresés aktív</b><span>Nem kell pontos cím: írj le annyit, amire emlékszel.</span></div>}
+      {inboxMode&&inboxCount>0&&<section className="smartInbox"><div><small>✦ OKOS RENDEZÉS</small><b>{safeSuggestionCount} biztos · {Math.max(0,smartSuggestions.length-safeSuggestionCount)} ellenőrzendő</b><span>Csak a magas megbízhatóságú találatokat rendezi automatikusan.</span></div>{safeSuggestionCount>0&&<button onClick={autoArrangeSafe}>Biztos találatok rendezése</button>}</section>}
       {selectedChatIds.length>0&&<section className="bulkBar"><b>{selectedChatIds.length} kijelölve</b><select defaultValue="" onChange={e=>bulkProject(e.target.value)}><option value="">Áthelyezés projektbe…</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><button onClick={()=>bulkArchive(!showArchived)}>{showArchived?'↩ Visszaállítás':'◌ Archiválás'}</button><button className="dangerMini" onClick={bulkDelete}>⌫ Törlés</button><button onClick={()=>setSelectedChatIds([])}>×</button></section>}
       <section className="chatList">
         {chatResults.length===0?<div className="emptyState"><div>⇩</div><h3>{showArchived?'Nincs archivált beszélgetés':'Importáld a ChatGPT előzményeidet'}</h3><p>{showArchived?'Az archivált beszélgetések itt jelennek meg.':<>A ChatGPT adatexportból a <b>conversations.json</b> fájlt válaszd ki. A feldolgozás a böngésződben történik.</>}</p>{!showArchived&&<button className="primary" onClick={()=>setShowImport(true)}>Import indítása</button>}</div>:
         chatResults.map(c=>{
           const p=projects.find(p=>p.id===c.assignedProjectId);
+          const suggestion=!c.assignedProjectId?suggestDestination(c,projects,topics):null;
           return <article className={'chatRow '+(selectedChatIds.includes(c.id)?'selectedRow':'')} key={c.id}>
             <div className="chatSelectCol"><input type="checkbox" checked={selectedChatIds.includes(c.id)} onChange={()=>toggleChatSelection(c.id)}/><div className={'chatDot '+(p?.accent||'blue')}>•••</div></div>
             <div className="chatCopy"><h3>{c.title}</h3><p>{c.preview||'Nincs rövid előnézet.'}</p><small>{niceDate(c.updated)} · {c.source==='import'?'ChatGPT export':'Kézi'} {c.topicId?'· '+(topics.find(t=>t.id===c.topicId)?.name||'Téma'):''}</small><div className="chatLinks">{c.source==='import'&&<a href={'https://chatgpt.com/c/'+c.id} target="_blank" rel="noreferrer">Megnyitás ChatGPT-ben ↗</a>}</div></div>
             <div className="chatSelectors">
+              {inboxMode&&suggestion&&<div className={'suggestBox '+(suggestion.confidence>=72?'high':'medium')}><div><small>JAVASLAT · {suggestion.confidence}%</small><b>{suggestion.projectName}</b>{suggestion.topicName&&suggestion.topicConfidence>=55&&<span>→ {suggestion.topicName} ({suggestion.topicConfidence}%)</span>}<em>{suggestion.reasons.join(' · ')}</em></div><button onClick={()=>acceptSuggestion(c.id)}>Elfogadom</button></div>}
               <select value={c.assignedProjectId||''} onChange={e=>assignChat(c.id,e.target.value)}>
-                <option value="">Rendezetlen</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+                <option value="">Rendezetlen</option>{projects.filter(p=>!p.archived).map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
               {c.assignedProjectId&&<select value={c.topicId||''} onChange={e=>assignTopic(c.id,e.target.value)}>
                 <option value="">Nincs téma</option>{topics.filter(t=>t.projectId===c.assignedProjectId).map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
