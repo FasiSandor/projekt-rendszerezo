@@ -1,6 +1,6 @@
 {
   "name": "projekt-rendszerezo",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -12,7 +12,8 @@
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "@neondatabase/serverless": "^1.0.2",
-    "@neondatabase/auth": "0.5.0-beta"
+    "@neondatabase/auth": "0.5.0-beta",
+    "jszip": "^3.10.1"
   },
   "devDependencies": {
     "typescript": "^5.7.2",

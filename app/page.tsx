@@ -1,6 +1,7 @@
 'use client';
 
 import {ChangeEvent,useEffect,useMemo,useRef,useState} from 'react';
+import JSZip from 'jszip';
 import {authClient} from '../lib/auth/client';
 
 type Accent='cyan'|'violet'|'pink'|'orange'|'green'|'blue';
@@ -307,6 +308,7 @@ export default function Home(){
  const [hydrated,setHydrated]=useState(false);
  const [importLogs,setImportLogs]=useState<ImportLog[]>([]);
  const [importSummary,setImportSummary]=useState<{total:number;added:number;updated:number;unchanged:number;assigned:number}|null>(null);
+ const [importBusy,setImportBusy]=useState(false);
  const fileRef=useRef<HTMLInputElement>(null);
  const backupRef=useRef<HTMLInputElement>(null);
 
@@ -476,18 +478,41 @@ export default function Home(){
    setProjects(x=>x.filter(p=>p.id!==id));setTopics(ts=>ts.filter(t=>t.projectId!==id));
    setChats(x=>x.map(c=>c.assignedProjectId===id?{...c,assignedProjectId:undefined,topicId:undefined}:c));setSelected(null);flash('Projekt törölve · chatek a Beérkezőben');
  }
+ async function readImportPayloads(files:File[]){
+   const payloads:{name:string;raw:any}[]=[];
+   for(const file of files){
+     if(/\.zip$/i.test(file.name)||file.type==='application/zip'||file.type==='application/x-zip-compressed'){
+       const zip=await JSZip.loadAsync(await file.arrayBuffer());
+       const entries=Object.values(zip.files)
+         .filter(entry=>!entry.dir&&/\.json$/i.test(entry.name))
+         .filter(entry=>/conversations?|projects?/i.test(entry.name))
+         .sort((a,b)=>a.name.localeCompare(b.name));
+       if(!entries.length)throw new Error('A ZIP-ben nem találtam conversations.json vagy projekt JSON fájlt.');
+       for(const entry of entries){
+         try{
+           const text=await entry.async('string');
+           payloads.push({name:file.name+' → '+entry.name,raw:JSON.parse(text)});
+         }catch{}
+       }
+     }else{
+       payloads.push({name:file.name,raw:JSON.parse(await file.text())});
+     }
+   }
+   return payloads;
+ }
  async function importFiles(e:ChangeEvent<HTMLInputElement>){
    const files=Array.from(e.target.files||[]); if(!files.length)return;
+   setImportBusy(true);
    try{
-     const payloads=await Promise.all(files.map(async file=>({file,raw:JSON.parse(await file.text())})));
+     const payloads=await readImportPayloads(files);
      const conversations:any[]=[];
      const projectNames=new Map<string,string>();
-     for(const {file,raw} of payloads){
+     for(const {name,raw} of payloads){
        const candidates=Array.isArray(raw?.conversations)?raw.conversations:
          (Array.isArray(raw)&&raw.some((x:any)=>x?.mapping||x?.conversation_id||x?.create_time)?raw:[]);
        conversations.push(...candidates);
        const projectList=Array.isArray(raw?.projects)?raw.projects:
-         (/project/i.test(file.name)&&Array.isArray(raw)?raw:[]);
+         (/project/i.test(name)&&Array.isArray(raw)?raw:[]);
        for(const p of projectList){
          const ref=p?.id??p?.project_id??p?.uuid;
          const label=p?.title??p?.name??p?.project_name;
@@ -562,6 +587,7 @@ export default function Home(){
    }catch(e){
      alert(e instanceof Error?e.message:'Az importált JSON-fájlokat nem tudtam feldolgozni.');
    }finally{
+     setImportBusy(false);
      if(fileRef.current)fileRef.current.value='';
    }
  }
@@ -813,13 +839,13 @@ export default function Home(){
 
    {showImport&&<div className="overlay" onClick={()=>setShowImport(false)}><section className="composer importModal" onClick={e=>e.stopPropagation()}>
       <div className="bigIco">⇩</div><h2>ChatGPT előzmények importja</h2>
-      <p>A ChatGPT adatexport ZIP-jéből válaszd ki a <b>conversations.json</b> fájlt, és ha az export tartalmaz külön projektfájlt, azt is kijelölheted egyszerre. Az import most már a ChatGPT <b>projektazonosítóit is felismeri</b>, automatikusan felépíti a projektkártyákat, majd inkrementálisan frissít úgy, hogy a kézi projekt-, téma- és archív besorolásaid megmaradjanak.</p>
-      <div className="privacyBox"><b>Helyben dolgozik</b><span>A fájlt ez a verzió nem tölti fel szerverre; a feldolgozás és mentés a böngésződben történik.</span></div>
+      <p>Most már elég a ChatGPT-től kapott <b>teljes export ZIP-et</b> kiválasztanod. A ChatHub helyben kibontja, megkeresi a conversations/project JSON fájlokat, felismeri a projektazonosítókat, felépíti a projektkártyákat, majd inkrementálisan frissít úgy, hogy a kézi projekt-, téma- és archív besorolásaid megmaradjanak.</p>
+      <div className="privacyBox"><b>Helyben bontja ki</b><span>A ZIP-et nem töltjük fel külön szerverre. A böngésző bontja ki és dolgozza fel, utána csak a rendezett ChatHub-adatok szinkronizálódnak a saját Neon-felhődbe.</span></div>
       {importLogs.length>0&&<div className="importHistory"><div className="historyHead"><b>Korábbi importok</b><span>utolsó {Math.min(importLogs.length,5)}</span></div>{importLogs.slice(0,5).map(l=><div className="historyRow" key={l.id}><div><strong>{niceDate(l.date)}</strong><span>{l.fileName}</span></div><div><b>+{l.added}</b><span>{l.updated} frissült · {l.unchanged} változatlan</span></div></div>)}</div>}
-      <input ref={fileRef} className="fileInput" type="file" multiple accept=".json,application/json" onChange={importFiles}/>
+      <input ref={fileRef} className="fileInput" type="file" multiple accept=".zip,.json,application/zip,application/json" onChange={importFiles}/>
       <div className="backupStrip"><div><b>ChatHub biztonsági mentés</b><span>Projektjeid, témáid és rendezésed külön JSON-fájlba menthető.</span></div><div><button className="soft" onClick={exportBackup}>⇩ Mentés</button><button className="soft" onClick={()=>backupRef.current?.click()}>⇧ Visszaállítás</button></div></div>
       <input ref={backupRef} className="fileInput" type="file" accept=".json,application/json" onChange={importBackup}/>
-      <div className="composerBtns"><button className="soft" onClick={()=>setShowImport(false)}>Mégse</button><button className="primary" onClick={()=>fileRef.current?.click()}>{importLogs.length?'ChatGPT export frissítése':'ChatGPT exportfájlok kiválasztása'}</button></div>
+      <div className="composerBtns"><button className="soft" disabled={importBusy} onClick={()=>setShowImport(false)}>Mégse</button><button className="primary" disabled={importBusy} onClick={()=>fileRef.current?.click()}>{importBusy?'Export feldolgozása…':importLogs.length?'Új ChatGPT export ZIP betöltése':'ChatGPT export ZIP kiválasztása'}</button></div>
    </section></div>}
 
    {toast&&<div className="toast">{toast}</div>}
