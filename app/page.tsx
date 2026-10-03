@@ -9,7 +9,7 @@ type Project={
   summary:string;next:string;last:string;tags:string[];favorite?:boolean;
 };
 type ChatItem={
-  id:string;title:string;preview:string;updated:string;source:'import'|'manual';
+  id:string;title:string;preview:string;searchText?:string;updated:string;source:'import'|'manual';
   assignedProjectId?:string;projectRef?:string|null;
 };
 
@@ -33,20 +33,88 @@ const cats=[
 ['Lezárt / parkoló','Archivált · Lezárt · Régi','blue','□']
 ] as const;
 
-function textFromConversation(c:any){
+function conversationTexts(c:any){
   try{
     const nodes=Object.values(c?.mapping||{}) as any[];
-    for(const node of nodes.reverse()){
+    const userTexts:string[]=[];
+    for(const node of nodes){
       const m=node?.message;
       if(m?.author?.role!=='user') continue;
       const parts=m?.content?.parts;
       if(Array.isArray(parts)){
-        const s=parts.filter((x:any)=>typeof x==='string').join(' ').replace(/\s+/g,' ').trim();
-        if(s) return s.slice(0,220);
+        const t=parts.filter((x:any)=>typeof x==='string').join(' ').replace(/\s+/g,' ').trim();
+        if(t) userTexts.push(t);
       }
     }
+    const joined=userTexts.join(' · ');
+    return {preview:(userTexts.at(-1)||'').slice(0,220),searchText:joined.slice(0,2600)};
   }catch{}
-  return '';
+  return {preview:'',searchText:''};
+}
+
+function normalizeText(v:string){
+  return (v||'').toLocaleLowerCase('hu-HU')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-z0-9]+/g,' ').trim();
+}
+const conceptGroups=[
+  ['illesi','illessy','illesy','illessy','gasztro kupa','szakacsverseny','versenyfogas'],
+  ['mota','mota system','mota english','mota learning'],
+  ['szakdoga','szakdolgozat','dolgozat'],
+  ['matek','matematika','szamolas','szamitas'],
+  ['naptar','calendar','esemeny'],
+  ['ertesites','notification','gmail','messenger','imessage'],
+  ['recept','receptura','etel','fozes','gasztro'],
+  ['testsuly','suly','fogyas','kilogramm']
+].map(g=>g.map(normalizeText));
+
+function levenshtein(a:string,b:string){
+  if(a===b)return 0;
+  if(!a.length)return b.length;if(!b.length)return a.length;
+  const row=Array.from({length:b.length+1},(_,i)=>i);
+  for(let i=1;i<=a.length;i++){
+    let prev=row[0];row[0]=i;
+    for(let j=1;j<=b.length;j++){
+      const tmp=row[j];
+      row[j]=Math.min(row[j]+1,row[j-1]+1,prev+(a[i-1]===b[j-1]?0:1));
+      prev=tmp;
+    }
+  }
+  return row[b.length];
+}
+function expandedQuery(q:string){
+  const n=normalizeText(q);
+  const tokens=n.split(' ').filter(Boolean);
+  const expanded=new Set(tokens);
+  for(const token of tokens){
+    for(const group of conceptGroups){
+      if(group.some(x=>x===token||x.includes(token)||token.includes(x)))group.forEach(x=>x.split(' ').forEach(y=>expanded.add(y)));
+    }
+  }
+  return [...expanded];
+}
+function fuzzyScore(q:string,text:string){
+  const nq=normalizeText(q); if(!nq)return 1;
+  const nt=normalizeText(text); if(!nt)return 0;
+  if(nt.includes(nq))return 100;
+  const qTokens=expandedQuery(q);
+  const tTokens=nt.split(' ').filter(Boolean);
+  let score=0;
+  for(const qt of qTokens){
+    let best=0;
+    for(const tt of tTokens){
+      if(tt===qt){best=12;break}
+      if(tt.includes(qt)||qt.includes(tt)){best=Math.max(best,9);continue}
+      const max=Math.max(tt.length,qt.length);
+      if(max>=4){
+        const d=levenshtein(qt,tt);
+        const sim=1-d/max;
+        if(sim>=.72)best=Math.max(best,Math.round(sim*8));
+      }
+    }
+    score+=best;
+  }
+  return score;
 }
 function niceDate(v:any){
   const n=typeof v==='number'?v*1000:Date.parse(v);
@@ -94,19 +162,21 @@ export default function Home(){
  useEffect(()=>{localStorage.setItem('chathub-projects-v2',JSON.stringify(projects))},[projects]);
  useEffect(()=>{localStorage.setItem('chathub-chats-v2',JSON.stringify(chats))},[chats]);
 
- const visible=useMemo(()=>projects.filter(p=>{
-   const text=(p.name+' '+p.category+' '+p.summary+' '+p.tags.join(' ')).toLowerCase();
-   if(!text.includes(query.toLowerCase()))return false;
-   if(filter==='Aktív')return p.status==='Aktív'||p.status==='Fejlesztés';
-   if(filter==='Kedvenc')return !!p.favorite;
-   if(filter==='Legutóbbi')return p.last==='Ma'||p.last==='Tegnap';
+ const visible=useMemo(()=>projects.map(p=>({
+   p,score:fuzzyScore(query,p.name+' '+p.category+' '+p.summary+' '+p.tags.join(' '))
+ })).filter(({p,score})=>{
+   if(query.trim()&&score<=0)return false;
+   if(filter==='Aktív'&&!(p.status==='Aktív'||p.status==='Fejlesztés'))return false;
+   if(filter==='Kedvenc'&&!p.favorite)return false;
+   if(filter==='Legutóbbi'&&!(p.last==='Ma'||p.last==='Tegnap'))return false;
    return true;
- }),[projects,query,filter]);
+ }).sort((a,b)=>query.trim()?b.score-a.score:0).map(x=>x.p),[projects,query,filter]);
 
- const chatResults=useMemo(()=>chats.filter(c=>{
-   const q=query.toLowerCase().trim();
-   return !q||(c.title+' '+c.preview).toLowerCase().includes(q);
- }).sort((a,b)=>b.updated.localeCompare(a.updated)),[chats,query]);
+ const chatResults=useMemo(()=>chats.map(c=>({
+   c,score:fuzzyScore(query,c.title+' '+c.preview+' '+(c.searchText||''))
+ })).filter(x=>!query.trim()||x.score>0)
+   .sort((a,b)=>query.trim()?b.score-a.score:b.c.updated.localeCompare(a.c.updated))
+   .map(x=>x.c),[chats,query]);
 
  function flash(t:string){setToast(t);setTimeout(()=>setToast(''),1700)}
  function create(){
@@ -134,11 +204,11 @@ export default function Home(){
      if(!list)throw new Error('Nem conversations.json');
      const parsed:ChatItem[]=list.map((c:any,i:number)=>{
        const title=(c?.title||'Névtelen beszélgetés').toString();
-       const preview=textFromConversation(c);
-       const assignedProjectId=inferProject(title,preview,projects);
+       const {preview,searchText}=conversationTexts(c);
+       const assignedProjectId=inferProject(title,searchText||preview,projects);
        return {
          id:(c?.id||c?.conversation_id||('import-'+i)).toString(),
-         title,preview,updated:new Date((c?.update_time||c?.create_time||0)*1000||Date.now()).toISOString(),
+         title,preview,searchText,updated:new Date((c?.update_time||c?.create_time||0)*1000||Date.now()).toISOString(),
          source:'import' as const,assignedProjectId,projectRef:c?.project_id||null
        };
      });
@@ -185,9 +255,16 @@ export default function Home(){
      <div className="heroBtns"><button className="primary" onClick={()=>setComposer('project')}>＋ Új projekt</button><button className="soft" onClick={()=>setShowImport(true)}>⇩ ChatGPT import</button></div>
    </section>
 
-   <section className="search"><span>⌕</span><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Keresés projektekben, beszélgetésekben, jegyzetekben..."/><kbd>⌘ K</kbd></section>
+   <section className="search smartSearch"><span>⌕</span><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Írj nevet, témát vagy csak egy foszlányt…"/><kbd>⌘ K</kbd></section>
+   {query.trim()&&<div className="searchHint"><b>Intelligens keresés</b><span>Elgépelést, ékezetet, névváltozatot és témarészletet is próbál felismerni.</span></div>}
    <div className="tags">{['matematika','Illéssy','OAuth','túrógombóc','401 hiba','PhD','recept','MOTA'].map(x=><button key={x} onClick={()=>setQuery(x)}>{x}</button>)}</div>
 
+   {query.trim()&&chatResults.length>0&&<section className="quickHits">
+      <div className="quickHead"><div><small>LEGJOBB BESZÉLGETÉS-TALÁLATOK</small><b>{chatResults.length} találat</b></div><button onClick={()=>setShowChats(true)}>Mind megnyitása →</button></div>
+      <div className="quickHitGrid">{chatResults.slice(0,3).map(c=><button key={c.id} onClick={()=>setShowChats(true)}>
+        <strong>{c.title}</strong><span>{c.preview||'Tartalmi egyezés'}</span>
+      </button>)}</div>
+   </section>}
    <section className="stats">
      <Stat icon="▱" n={projects.length} label="Projekt" c="blue"/>
      <Stat icon="•••" n={chats.length||projects.reduce((a,p)=>a+p.chats,0)} label="Chat" c="cyan"/>
@@ -220,7 +297,8 @@ export default function Home(){
       <div><small>✦ BESZÉLGETÉSKATALÓGUS</small><h1>Chatek</h1><p>{chats.length?chats.length+' importált vagy rögzített beszélgetés':'Még nincs importált beszélgetés.'}</p></div>
       <div className="heroBtns"><button className="primary" onClick={()=>setShowImport(true)}>⇩ Import</button><button className="soft" onClick={()=>{setSelected(null);setComposer('chat')}}>＋ Új chat</button></div>
     </section>
-    <section className="search"><span>⌕</span><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Keresés a beszélgetések között..."/><kbd>{chatResults.length}</kbd></section>
+    <section className="search smartSearch"><span>⌕</span><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Pl. „az a harcsás versenyfogás tejföl pöttyel”"/><kbd>{chatResults.length}</kbd></section>
+    {query.trim()&&<div className="searchHint"><b>Foszlánykeresés aktív</b><span>Nem kell pontos cím: írj le annyit, amire emlékszel.</span></div>}
     <section className="chatList">
       {chatResults.length===0?<div className="emptyState"><div>⇩</div><h3>Importáld a ChatGPT előzményeidet</h3><p>A ChatGPT adatexportból a <b>conversations.json</b> fájlt válaszd ki. A feldolgozás a böngésződben történik.</p><button className="primary" onClick={()=>setShowImport(true)}>Import indítása</button></div>:
       chatResults.map(c=>{
