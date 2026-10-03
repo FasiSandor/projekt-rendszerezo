@@ -10,7 +10,7 @@ type Project={
 };
 type ChatItem={
   id:string;title:string;preview:string;searchText?:string;updated:string;source:'import'|'manual';
-  assignedProjectId?:string;topicId?:string;projectRef?:string|null;
+  assignedProjectId?:string;topicId?:string;archived?:boolean;projectRef?:string|null;
 };
 type Topic={id:string;projectId:string;name:string;createdAt:string};
 
@@ -201,8 +201,11 @@ export default function Home(){
  const [showImport,setShowImport]=useState(false);
  const [showChats,setShowChats]=useState(false);
  const [clusterMode,setClusterMode]=useState(false);
+ const [selectedChatIds,setSelectedChatIds]=useState<string[]>([]);
+ const [showArchived,setShowArchived]=useState(false);
  const [importSummary,setImportSummary]=useState<{total:number;assigned:number}|null>(null);
  const fileRef=useRef<HTMLInputElement>(null);
+ const backupRef=useRef<HTMLInputElement>(null);
 
  useEffect(()=>{
    const p=localStorage.getItem('chathub-projects-v2');
@@ -230,9 +233,9 @@ export default function Home(){
 
  const chatResults=useMemo(()=>chats.map(c=>({
    c,score:fuzzyScore(query,c.title+' '+c.preview+' '+(c.searchText||''))
- })).filter(x=>!query.trim()||x.score>0)
+ })).filter(x=>(showArchived?!!x.c.archived:!x.c.archived)&&(!query.trim()||x.score>0))
    .sort((a,b)=>query.trim()?b.score-a.score:b.c.updated.localeCompare(a.c.updated))
-   .map(x=>x.c),[chats,query]);
+   .map(x=>x.c),[chats,query,showArchived]);
 
  function flash(t:string){setToast(t);setTimeout(()=>setToast(''),1700)}
  function create(){
@@ -296,7 +299,7 @@ export default function Home(){
  }
  function makeTopic(projectId:string,label:string,ids:string[]){
    if(!projectId)return;
-   const clean=label.split('·')[0].trim().replace(/w/g,m=>m.toLocaleUpperCase('hu-HU')).slice(0,42)||'Új téma';
+   const clean=label.split('·')[0].trim().replace(/\b\w/g,m=>m.toLocaleUpperCase('hu-HU')).slice(0,42)||'Új téma';
    const existing=topics.find(t=>t.projectId===projectId&&normalizeText(t.name)===normalizeText(clean));
    const topic=existing||{id:crypto.randomUUID(),projectId,name:clean,createdAt:new Date().toISOString()};
    if(!existing)setTopics(ts=>[topic,...ts]);
@@ -308,7 +311,50 @@ export default function Home(){
    const topic=topics.find(t=>t.id===topicId);
    setChats(cs=>cs.map(c=>c.id===chatId?{...c,topicId:topicId||undefined,assignedProjectId:topic?.projectId||c.assignedProjectId}:c));
  }
- const selectedChats=selected?chats.filter(c=>c.assignedProjectId===selected.id):[];
+ function toggleChatSelection(id:string){setSelectedChatIds(xs=>xs.includes(id)?xs.filter(x=>x!==id):[...xs,id])}
+ function bulkProject(projectId:string){
+   if(!projectId||!selectedChatIds.length)return;
+   const ids=new Set(selectedChatIds);
+   setChats(cs=>cs.map(c=>ids.has(c.id)?{...c,assignedProjectId:projectId,topicId:undefined}:c));
+   flash(selectedChatIds.length+' chat áthelyezve');setSelectedChatIds([]);
+ }
+ function bulkArchive(value:boolean){
+   if(!selectedChatIds.length)return;
+   const ids=new Set(selectedChatIds);
+   setChats(cs=>cs.map(c=>ids.has(c.id)?{...c,archived:value}:c));
+   flash(selectedChatIds.length+(value?' chat archiválva':' chat visszaállítva'));setSelectedChatIds([]);
+ }
+ function bulkDelete(){
+   if(!selectedChatIds.length||!confirm('Biztosan törlöd a kijelölt chat-bejegyzéseket a katalógusból?'))return;
+   const ids=new Set(selectedChatIds);setChats(cs=>cs.filter(c=>!ids.has(c.id)));setSelectedChatIds([]);flash('Kijelölt chatek törölve');
+ }
+ function addTopic(projectId:string){
+   const v=prompt('Új téma neve');if(!v?.trim())return;
+   setTopics(ts=>[{id:crypto.randomUUID(),projectId,name:v.trim(),createdAt:new Date().toISOString()},...ts]);flash('Téma létrehozva');
+ }
+ function renameTopic(id:string){
+   const t=topics.find(x=>x.id===id);if(!t)return;
+   const v=prompt('Téma új neve',t.name);if(!v?.trim())return;
+   setTopics(ts=>ts.map(x=>x.id===id?{...x,name:v.trim()}:x));flash('Téma átnevezve');
+ }
+ function deleteTopic(id:string){
+   const t=topics.find(x=>x.id===id);if(!t||!confirm('Törlöd ezt a témát? A chatek a projektben maradnak.'))return;
+   setTopics(ts=>ts.filter(x=>x.id!==id));setChats(cs=>cs.map(c=>c.topicId===id?{...c,topicId:undefined}:c));flash('Téma törölve');
+ }
+ function exportBackup(){
+   const blob=new Blob([JSON.stringify({version:1,exportedAt:new Date().toISOString(),projects,chats,topics},null,2)],{type:'application/json'});
+   const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='chathub-backup.json';a.click();URL.revokeObjectURL(url);flash('Biztonsági mentés elkészült');
+ }
+ async function importBackup(e:ChangeEvent<HTMLInputElement>){
+   const file=e.target.files?.[0];if(!file)return;
+   try{
+     const data=JSON.parse(await file.text());
+     if(!Array.isArray(data.projects)||!Array.isArray(data.chats)||!Array.isArray(data.topics))throw new Error();
+     setProjects(data.projects);setChats(data.chats);setTopics(data.topics);flash('Biztonsági mentés visszaállítva');
+   }catch{alert('Ez nem érvényes ChatHub biztonsági mentés.')}
+   finally{if(backupRef.current)backupRef.current.value=''}
+ }
+ const selectedChats=selected?chats.filter(c=>c.assignedProjectId===selected.id&&!c.archived):[];
  const selectedTopics=selected?topics.filter(t=>t.projectId===selected.id):[];
 
  return <main className="shell">
@@ -372,18 +418,19 @@ export default function Home(){
    </> : <>
     <section className="hero compactHero">
       <div><small>✦ {clusterMode?'RENDETLENSÉG / KLASZTEREK':'BESZÉLGETÉSKATALÓGUS'}</small><h1>{clusterMode?'Kapcsolódó csetek':'Chatek'}</h1><p>{clusterMode?(clusters.length?clusters.length+' valószínű témacsoport':'Import után itt jelennek meg a hasonló csetek'):(chats.length?chats.length+' importált vagy rögzített beszélgetés':'Még nincs importált beszélgetés.')}</p></div>
-      <div className="heroBtns"><button className="primary" onClick={()=>setShowImport(true)}>⇩ Import</button><button className="soft" onClick={()=>setClusterMode(!clusterMode)}>{clusterMode?'□ Chatlista':'✦ Klaszterek'}</button></div>
+      <div className="heroBtns"><button className="primary" onClick={()=>setShowImport(true)}>⇩ Import</button><button className="soft" onClick={()=>setClusterMode(!clusterMode)}>{clusterMode?'□ Chatlista':'✦ Klaszterek'}</button><button className="soft" onClick={()=>setShowArchived(!showArchived)}>{showArchived?'↩ Aktív':'◌ Archív'}</button></div>
     </section>
     {!clusterMode?<>
       <section className="search smartSearch"><span>⌕</span><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Pl. „az a harcsás versenyfogás tejföl pöttyel”"/><kbd>{chatResults.length}</kbd></section>
       {query.trim()&&<div className="searchHint"><b>Foszlánykeresés aktív</b><span>Nem kell pontos cím: írj le annyit, amire emlékszel.</span></div>}
+      {selectedChatIds.length>0&&<section className="bulkBar"><b>{selectedChatIds.length} kijelölve</b><select defaultValue="" onChange={e=>bulkProject(e.target.value)}><option value="">Áthelyezés projektbe…</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><button onClick={()=>bulkArchive(!showArchived)}>{showArchived?'↩ Visszaállítás':'◌ Archiválás'}</button><button className="dangerMini" onClick={bulkDelete}>⌫ Törlés</button><button onClick={()=>setSelectedChatIds([])}>×</button></section>}
       <section className="chatList">
-        {chatResults.length===0?<div className="emptyState"><div>⇩</div><h3>Importáld a ChatGPT előzményeidet</h3><p>A ChatGPT adatexportból a <b>conversations.json</b> fájlt válaszd ki. A feldolgozás a böngésződben történik.</p><button className="primary" onClick={()=>setShowImport(true)}>Import indítása</button></div>:
+        {chatResults.length===0?<div className="emptyState"><div>⇩</div><h3>{showArchived?'Nincs archivált beszélgetés':'Importáld a ChatGPT előzményeidet'}</h3><p>{showArchived?'Az archivált beszélgetések itt jelennek meg.':<>A ChatGPT adatexportból a <b>conversations.json</b> fájlt válaszd ki. A feldolgozás a böngésződben történik.</>}</p>{!showArchived&&<button className="primary" onClick={()=>setShowImport(true)}>Import indítása</button>}</div>:
         chatResults.map(c=>{
           const p=projects.find(p=>p.id===c.assignedProjectId);
-          return <article className="chatRow" key={c.id}>
-            <div className={'chatDot '+(p?.accent||'blue')}>•••</div>
-            <div className="chatCopy"><h3>{c.title}</h3><p>{c.preview||'Nincs rövid előnézet.'}</p><small>{niceDate(c.updated)} · {c.source==='import'?'ChatGPT export':'Kézi'}</small></div>
+          return <article className={'chatRow '+(selectedChatIds.includes(c.id)?'selectedRow':'')} key={c.id}>
+            <div className="chatSelectCol"><input type="checkbox" checked={selectedChatIds.includes(c.id)} onChange={()=>toggleChatSelection(c.id)}/><div className={'chatDot '+(p?.accent||'blue')}>•••</div></div>
+            <div className="chatCopy"><h3>{c.title}</h3><p>{c.preview||'Nincs rövid előnézet.'}</p><small>{niceDate(c.updated)} · {c.source==='import'?'ChatGPT export':'Kézi'} {c.topicId?'· '+(topics.find(t=>t.id===c.topicId)?.name||'Téma'):''}</small><div className="chatLinks">{c.source==='import'&&<a href={'https://chatgpt.com/c/'+c.id} target="_blank" rel="noreferrer">Megnyitás ChatGPT-ben ↗</a>}</div></div>
             <div className="chatSelectors">
               <select value={c.assignedProjectId||''} onChange={e=>assignChat(c.id,e.target.value)}>
                 <option value="">Rendezetlen</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
@@ -442,7 +489,9 @@ export default function Home(){
       <p>A ChatGPT adatexport ZIP-jéből válaszd ki a <b>conversations.json</b> fájlt. Az app beolvassa a beszélgetések címét, utolsó dátumát és egy rövid saját előnézetet, majd megpróbálja projektekhez sorolni őket.</p>
       <div className="privacyBox"><b>Helyben dolgozik</b><span>A fájlt ez a verzió nem tölti fel szerverre; a feldolgozás és mentés a böngésződben történik.</span></div>
       <input ref={fileRef} className="fileInput" type="file" accept=".json,application/json" onChange={importFile}/>
-      <div className="composerBtns"><button className="soft" onClick={()=>setShowImport(false)}>Mégse</button><button className="primary" onClick={()=>fileRef.current?.click()}>Fájl kiválasztása</button></div>
+      <div className="backupStrip"><div><b>ChatHub biztonsági mentés</b><span>Projektjeid, témáid és rendezésed külön JSON-fájlba menthető.</span></div><div><button className="soft" onClick={exportBackup}>⇩ Mentés</button><button className="soft" onClick={()=>backupRef.current?.click()}>⇧ Visszaállítás</button></div></div>
+      <input ref={backupRef} className="fileInput" type="file" accept=".json,application/json" onChange={importBackup}/>
+      <div className="composerBtns"><button className="soft" onClick={()=>setShowImport(false)}>Mégse</button><button className="primary" onClick={()=>fileRef.current?.click()}>ChatGPT fájl kiválasztása</button></div>
    </section></div>}
 
    {toast&&<div className="toast">{toast}</div>}
