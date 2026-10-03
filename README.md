@@ -1,15 +1,15 @@
 # ChatHub – Projekt Rendszerező
 
-Saját, mobil-first projekt- és beszélgetéskatalógus.
+Saját, mobil-first projekt- és beszélgetéskatalógus iPhone–iPad–Mac felhőszinkronnal.
 
-## v0.1
-- projektkártyák és kategóriák
-- globális keresés és gyors szűrés
-- új projekt / új chat folyamat
-- kedvenc és törlés a katalógusból
-- rendetlenség-figyelő alap
-- localStorage mentés
-- PWA manifest és saját ikon
+## Aktuális állapot
+- Neon Postgres + Neon Auth / Better Auth
+- többeszközös felhőszinkron
+- ChatGPT `conversations.json` inkrementális import
+- ChatGPT `project_id` felismerés és automatikus projektkártya-felépítés
+- meglévő kézi projekt/téma/archív besorolás megőrzése újraimportnál
+- globális foszlánykeresés, okos beérkező, klaszterezés és duplikációfigyelés
+- helyi biztonsági mentés + Neon felhő
 
-## Következő
-ChatGPT export import, klaszterezés, Supabase szinkron, ChatGPT mélylinkek és biztonságos archiválás.
+## Import
+A ChatGPT adatexport ZIP-jét ki kell bontani. A ChatHubban jelöld ki a `conversations.json` fájlt; ha az export külön projektlistát is tartalmaz (például `projects.json`), azt ugyanabban a fájlválasztásban hozzáadhatod. A kliens a projektazonosítókat a chatekhez köti, és csak a rendezett katalógust menti a Neonba.
