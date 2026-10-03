@@ -1,13 +1,13 @@
 import {NextRequest,NextResponse} from 'next/server';
 import {ensureChatHubSchema,getSql} from '../../../../lib/neon';
-import {getAuth} from '../../../../lib/auth/server';
+import {auth} from '../../../../lib/auth/server';
 
 export const dynamic='force-dynamic';
 
 async function ownerId(){
   try{
-    const result:any=await getAuth().getSession();
-    return result?.data?.user?.id||null;
+    const {data:session}=await auth.getSession();
+    return session?.user?.id||null;
   }catch{return null}
 }
 function safeArray(v:any){return Array.isArray(v)?v:[]}
@@ -25,8 +25,10 @@ export async function GET(){
     sql`select last_sync_at from chathub_sync_state where owner_id=${owner}`
   ]);
   return NextResponse.json({
-    projects:projects.map((r:any)=>r.data),chats:chats.map((r:any)=>r.data),
-    topics:topics.map((r:any)=>r.data),importLogs:logs.map((r:any)=>r.data),
+    projects:projects.map((r:any)=>r.data),
+    chats:chats.map((r:any)=>r.data),
+    topics:topics.map((r:any)=>r.data),
+    importLogs:logs.map((r:any)=>r.data),
     lastSyncAt:state[0]?.last_sync_at||null
   },{headers:{'Cache-Control':'no-store'}});
 }
@@ -35,7 +37,10 @@ export async function POST(request:NextRequest){
   const owner=await ownerId();
   if(!owner)return NextResponse.json({error:'unauthorized'},{status:401});
   const body=await request.json();
-  const projects=safeArray(body.projects),chats=safeArray(body.chats),topics=safeArray(body.topics),importLogs=safeArray(body.importLogs).slice(0,20);
+  const projects=safeArray(body.projects);
+  const chats=safeArray(body.chats);
+  const topics=safeArray(body.topics);
+  const importLogs=safeArray(body.importLogs).slice(0,20);
   await ensureChatHubSchema();
   const sql=getSql();
 
