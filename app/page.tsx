@@ -10,8 +10,9 @@ type Project={
 };
 type ChatItem={
   id:string;title:string;preview:string;searchText?:string;updated:string;source:'import'|'manual';
-  assignedProjectId?:string;projectRef?:string|null;
+  assignedProjectId?:string;topicId?:string;projectRef?:string|null;
 };
+type Topic={id:string;projectId:string;name:string;createdAt:string};
 
 const starter:Project[]=[
 {id:'ertesites',name:'Értesítési Központ',category:'APP FEJLESZTÉS',chats:16,accent:'blue',status:'Aktív',summary:'Gmail, Messenger, iMessage és naptárkapcsolatok.',next:'iMessage + sebesség',last:'Ma',tags:['Gmail','Messenger','Naptár'],favorite:true},
@@ -190,6 +191,7 @@ function inferProject(title:string,preview:string,projects:Project[]){
 export default function Home(){
  const [projects,setProjects]=useState<Project[]>(starter);
  const [chats,setChats]=useState<ChatItem[]>([]);
+ const [topics,setTopics]=useState<Topic[]>([]);
  const [query,setQuery]=useState('');
  const [filter,setFilter]=useState<'Összes'|'Aktív'|'Kedvenc'|'Legutóbbi'>('Összes');
  const [selected,setSelected]=useState<Project|null>(null);
@@ -205,11 +207,14 @@ export default function Home(){
  useEffect(()=>{
    const p=localStorage.getItem('chathub-projects-v2');
    const c=localStorage.getItem('chathub-chats-v2');
+   const t=localStorage.getItem('chathub-topics-v1');
    if(p){try{setProjects(JSON.parse(p))}catch{}}
    if(c){try{setChats(JSON.parse(c))}catch{}}
+   if(t){try{setTopics(JSON.parse(t))}catch{}}
  },[]);
  useEffect(()=>{localStorage.setItem('chathub-projects-v2',JSON.stringify(projects))},[projects]);
  useEffect(()=>{localStorage.setItem('chathub-chats-v2',JSON.stringify(chats))},[chats]);
+ useEffect(()=>{localStorage.setItem('chathub-topics-v1',JSON.stringify(topics))},[topics]);
 
  const visible=useMemo(()=>projects.map(p=>({
    p,score:fuzzyScore(query,p.name+' '+p.category+' '+p.summary+' '+p.tags.join(' '))
@@ -289,7 +294,22 @@ export default function Home(){
    setChats(cs=>cs.map(c=>set.has(c.id)?{...c,assignedProjectId:projectId}:c));
    flash(ids.length+' chat a projekthez rendelve');
  }
+ function makeTopic(projectId:string,label:string,ids:string[]){
+   if(!projectId)return;
+   const clean=label.split('·')[0].trim().replace(/w/g,m=>m.toLocaleUpperCase('hu-HU')).slice(0,42)||'Új téma';
+   const existing=topics.find(t=>t.projectId===projectId&&normalizeText(t.name)===normalizeText(clean));
+   const topic=existing||{id:crypto.randomUUID(),projectId,name:clean,createdAt:new Date().toISOString()};
+   if(!existing)setTopics(ts=>[topic,...ts]);
+   const set=new Set(ids);
+   setChats(cs=>cs.map(c=>set.has(c.id)?{...c,assignedProjectId:projectId,topicId:topic.id}:c));
+   flash(ids.length+' chat → '+topic.name);
+ }
+ function assignTopic(chatId:string,topicId:string){
+   const topic=topics.find(t=>t.id===topicId);
+   setChats(cs=>cs.map(c=>c.id===chatId?{...c,topicId:topicId||undefined,assignedProjectId:topic?.projectId||c.assignedProjectId}:c));
+ }
  const selectedChats=selected?chats.filter(c=>c.assignedProjectId===selected.id):[];
+ const selectedTopics=selected?topics.filter(t=>t.projectId===selected.id):[];
 
  return <main className="shell">
    <div className="aurora a1"/><div className="aurora a2"/><div className="grid"/>
@@ -364,9 +384,14 @@ export default function Home(){
           return <article className="chatRow" key={c.id}>
             <div className={'chatDot '+(p?.accent||'blue')}>•••</div>
             <div className="chatCopy"><h3>{c.title}</h3><p>{c.preview||'Nincs rövid előnézet.'}</p><small>{niceDate(c.updated)} · {c.source==='import'?'ChatGPT export':'Kézi'}</small></div>
-            <select value={c.assignedProjectId||''} onChange={e=>assignChat(c.id,e.target.value)}>
-              <option value="">Rendezetlen</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
+            <div className="chatSelectors">
+              <select value={c.assignedProjectId||''} onChange={e=>assignChat(c.id,e.target.value)}>
+                <option value="">Rendezetlen</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+              {c.assignedProjectId&&<select value={c.topicId||''} onChange={e=>assignTopic(c.id,e.target.value)}>
+                <option value="">Nincs téma</option>{topics.filter(t=>t.projectId===c.assignedProjectId).map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>}
+            </div>
           </article>
         })}
       </section>
@@ -377,7 +402,13 @@ export default function Home(){
         return <article className="clusterCard" key={cl.id}>
           <div className="clusterTop"><div className="clusterNum">0{i+1}</div><div><small>VALÓSZÍNŰ TÉMACSOPORT · {cl.confidence}%</small><h3>{cl.label}</h3><p>{cl.items.length} beszélgetés kapcsolódhat egymáshoz</p></div></div>
           <div className="clusterChats">{cl.items.slice(0,6).map(c=><div key={c.id}><span>•••</span><b>{c.title}</b><small>{niceDate(c.updated)}</small></div>)}</div>
-          <div className="clusterAction"><div><small>Javasolt projekt</small><strong>{suggested?.name||'Még nincs biztos javaslat'}</strong></div><select defaultValue={cl.projectId||''} onChange={e=>assignCluster(cl.items.map(x=>x.id),e.target.value)}><option value="">Projekt választása…</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></div>
+          <div className="clusterAction">
+            <div><small>Javasolt projekt</small><strong>{suggested?.name||'Még nincs biztos javaslat'}</strong></div>
+            <div className="clusterButtons">
+              <select defaultValue={cl.projectId||''} onChange={e=>assignCluster(cl.items.map(x=>x.id),e.target.value)}><option value="">Projekt választása…</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select>
+              {cl.projectId&&<button onClick={()=>makeTopic(cl.projectId!,cl.label,cl.items.map(x=>x.id))}>＋ Téma létrehozása</button>}
+            </div>
+          </div>
         </article>
       })}
     </section>}
@@ -389,8 +420,12 @@ export default function Home(){
       <button className="x" onClick={()=>setSelected(null)}>×</button>
       <div className={'sheetHero '+selected.accent}><small>{selected.category}</small><h2>{selected.name}</h2><p>{selected.summary}</p></div>
       <div className="sheetBtns"><button className="primary" onClick={()=>setComposer('chat')}>＋ Új chat</button><button className="soft" onClick={()=>setProjects(xs=>xs.map(p=>p.id===selected.id?{...p,favorite:!p.favorite}:p))}>{selected.favorite?'★ Kedvenc':'☆ Kedvencekhez'}</button></div>
-      <div className="info"><div><span>Importált / hozzárendelt chatek</span><b>{selectedChats.length}</b></div><div><span>Állapot</span><b>{selected.status}</b></div><div><span>Következő</span><b>{selected.next}</b></div></div>
-      {selectedChats.slice(0,4).map(c=><div className="miniChat" key={c.id}><b>{c.title}</b><span>{niceDate(c.updated)}</span></div>)}
+      <div className="info"><div><span>Importált / hozzárendelt chatek</span><b>{selectedChats.length}</b></div><div><span>Témák</span><b>{selectedTopics.length}</b></div><div><span>Következő</span><b>{selected.next}</b></div></div>
+      {selectedTopics.length>0&&<div className="topicGrid">{selectedTopics.map(t=>{
+        const n=selectedChats.filter(c=>c.topicId===t.id).length;
+        return <button key={t.id} onClick={()=>{setQuery(t.name);setShowChats(true);setSelected(null)}}><i>◇</i><span><b>{t.name}</b><small>{n} chat</small></span></button>
+      })}</div>}
+      {selectedChats.filter(c=>!c.topicId).slice(0,4).map(c=><div className="miniChat" key={c.id}><b>{c.title}</b><span>{niceDate(c.updated)}</span></div>)}
       {selectedChats.length>4&&<button className="soft fullBtn" onClick={()=>{setQuery(selected.name.split(' ')[0]);setShowChats(true);setSelected(null)}}>Összes beszélgetés megnyitása</button>}
       <button className="delete" onClick={()=>remove(selected.id)}>⌫ Törlés a katalógusból</button>
    </section></div>}
