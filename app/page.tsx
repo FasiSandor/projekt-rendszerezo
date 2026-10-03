@@ -6,7 +6,7 @@ type Accent='cyan'|'violet'|'pink'|'orange'|'green'|'blue';
 type Project={
   id:string;name:string;category:string;chats:number;accent:Accent;
   status:'Aktív'|'Fejlesztés'|'Rendezendő'|'Parkoló';
-  summary:string;next:string;last:string;tags:string[];favorite?:boolean;
+  summary:string;next:string;last:string;tags:string[];favorite?:boolean;archived?:boolean;
 };
 type ChatItem={
   id:string;title:string;preview:string;searchText?:string;updated:string;source:'import'|'manual';
@@ -142,6 +142,24 @@ function similarity(a:ChatItem,b:ChatItem){
   }
   return score;
 }
+function findDuplicateGroups(chats:ChatItem[]){
+  const active=chats.filter(c=>!c.archived);
+  const used=new Set<string>(),out:ChatItem[][]=[];
+  for(const seed of active){
+    if(used.has(seed.id))continue;
+    const a=normalizeText(seed.title);
+    const matches=active.filter(c=>{
+      if(c.id===seed.id||used.has(c.id))return false;
+      const b=normalizeText(c.title);
+      const exact=!!a&&a===b;
+      const close=a.length>5&&b.length>5&&levenshtein(a,b)/Math.max(a.length,b.length)<=.18;
+      return exact||close||similarity(seed,c)>=.62;
+    }).slice(0,7);
+    if(matches.length){const g=[seed,...matches].sort((x,y)=>y.updated.localeCompare(x.updated));g.forEach(c=>used.add(c.id));out.push(g)}
+  }
+  return out.sort((a,b)=>b.length-a.length);
+}
+
 function makeClusters(chats:ChatItem[]){
   const pool=[...chats].sort((a,b)=>b.updated.localeCompare(a.updated));
   const used=new Set<string>();
@@ -201,8 +219,10 @@ export default function Home(){
  const [showImport,setShowImport]=useState(false);
  const [showChats,setShowChats]=useState(false);
  const [clusterMode,setClusterMode]=useState(false);
+ const [inboxMode,setInboxMode]=useState(false);
  const [selectedChatIds,setSelectedChatIds]=useState<string[]>([]);
  const [showArchived,setShowArchived]=useState(false);
+ const [showProjectArchive,setShowProjectArchive]=useState(false);
  const [importSummary,setImportSummary]=useState<{total:number;assigned:number}|null>(null);
  const fileRef=useRef<HTMLInputElement>(null);
  const backupRef=useRef<HTMLInputElement>(null);
@@ -222,20 +242,23 @@ export default function Home(){
  const visible=useMemo(()=>projects.map(p=>({
    p,score:fuzzyScore(query,p.name+' '+p.category+' '+p.summary+' '+p.tags.join(' '))
  })).filter(({p,score})=>{
+   if(showProjectArchive?!p.archived:p.archived)return false;
    if(query.trim()&&score<=0)return false;
    if(filter==='Aktív'&&!(p.status==='Aktív'||p.status==='Fejlesztés'))return false;
    if(filter==='Kedvenc'&&!p.favorite)return false;
    if(filter==='Legutóbbi'&&!(p.last==='Ma'||p.last==='Tegnap'))return false;
    return true;
- }).sort((a,b)=>query.trim()?b.score-a.score:0).map(x=>x.p),[projects,query,filter]);
+ }).sort((a,b)=>query.trim()?b.score-a.score:0).map(x=>x.p),[projects,query,filter,showProjectArchive]);
 
- const clusters=useMemo(()=>makeClusters(chats),[chats]);
+ const clusters=useMemo(()=>makeClusters(chats.filter(c=>!c.archived)),[chats]);
+ const duplicateGroups=useMemo(()=>findDuplicateGroups(chats),[chats]);
+ const inboxCount=chats.filter(c=>!c.archived&&!c.assignedProjectId).length;
 
  const chatResults=useMemo(()=>chats.map(c=>({
    c,score:fuzzyScore(query,c.title+' '+c.preview+' '+(c.searchText||''))
- })).filter(x=>(showArchived?!!x.c.archived:!x.c.archived)&&(!query.trim()||x.score>0))
+ })).filter(x=>(showArchived?!!x.c.archived:!x.c.archived)&&(!inboxMode||!x.c.assignedProjectId)&&(!query.trim()||x.score>0))
    .sort((a,b)=>query.trim()?b.score-a.score:b.c.updated.localeCompare(a.c.updated))
-   .map(x=>x.c),[chats,query,showArchived]);
+   .map(x=>x.c),[chats,query,showArchived,inboxMode]);
 
  function flash(t:string){setToast(t);setTimeout(()=>setToast(''),1700)}
  function create(){
@@ -251,9 +274,19 @@ export default function Home(){
    }
    setName('');setComposer(null);
  }
+ function updateSelected(patch:Partial<Project>){
+   if(!selected)return;const next={...selected,...patch};
+   setProjects(ps=>ps.map(p=>p.id===selected.id?next:p));setSelected(next);
+ }
+ function archiveProject(id:string,value=true){
+   setProjects(ps=>ps.map(p=>p.id===id?{...p,archived:value,status:value?'Parkoló':p.status}:p));setSelected(null);flash(value?'Projekt archiválva':'Projekt visszaállítva');
+ }
  function remove(id:string){
-   if(!confirm('Biztosan törlöd ezt a projektet a katalógusból?'))return;
-   setProjects(x=>x.filter(p=>p.id!==id));setChats(x=>x.map(c=>c.assignedProjectId===id?{...c,assignedProjectId:undefined}:c));setSelected(null);flash('Projekt törölve');
+   const linked=chats.filter(c=>c.assignedProjectId===id).length;
+   const msg=linked?'Ehhez a projekthez '+linked+' chat tartozik.\n\nOK = projekt törlése, a chatek a Beérkezőbe kerülnek.':'Biztosan törlöd ezt a projektet a katalógusból?';
+   if(!confirm(msg))return;
+   setProjects(x=>x.filter(p=>p.id!==id));setTopics(ts=>ts.filter(t=>t.projectId!==id));
+   setChats(x=>x.map(c=>c.assignedProjectId===id?{...c,assignedProjectId:undefined,topicId:undefined}:c));setSelected(null);flash('Projekt törölve · chatek a Beérkezőben');
  }
  async function importFile(e:ChangeEvent<HTMLInputElement>){
    const file=e.target.files?.[0]; if(!file)return;
@@ -324,6 +357,11 @@ export default function Home(){
    setChats(cs=>cs.map(c=>ids.has(c.id)?{...c,archived:value}:c));
    flash(selectedChatIds.length+(value?' chat archiválva':' chat visszaállítva'));setSelectedChatIds([]);
  }
+ function archiveDuplicateGroup(group:ChatItem[]){
+   const keep=[...group].sort((a,b)=>b.updated.localeCompare(a.updated))[0];
+   const ids=new Set(group.filter(c=>c.id!==keep.id).map(c=>c.id));
+   setChats(cs=>cs.map(c=>ids.has(c.id)?{...c,archived:true}:c));flash((group.length-1)+' régebbi duplikátum archiválva');
+ }
  function bulkDelete(){
    if(!selectedChatIds.length||!confirm('Biztosan törlöd a kijelölt chat-bejegyzéseket a katalógusból?'))return;
    const ids=new Set(selectedChatIds);setChats(cs=>cs.filter(c=>!ids.has(c.id)));setSelectedChatIds([]);flash('Kijelölt chatek törölve');
@@ -363,11 +401,11 @@ export default function Home(){
    <header className="top">
      <div className="brand"><img src="/icon.svg" alt="ChatHub"/><b>Chat<span>Hub</span></b></div>
      <nav>
-       <button className={!showChats?'on':''} onClick={()=>{setShowChats(false);setClusterMode(false)}}>⌂ Kezdőlap</button>
-       <button onClick={()=>{setShowChats(false);setClusterMode(false)}}>Projektek</button>
-       <button className={showChats&&!clusterMode?'on':''} onClick={()=>{setShowChats(true);setClusterMode(false)}}>Chatek</button>
-       <button onClick={()=>setShowImport(true)}>Import</button>
-       <button className={showChats&&clusterMode?'on':''} onClick={()=>{setShowChats(true);setClusterMode(true)}}>Rendetlenség</button>
+       <button className={!showChats?'on':''} onClick={()=>{setShowChats(false);setClusterMode(false);setInboxMode(false)}}>⌂ Kezdőlap</button>
+       <button onClick={()=>{setShowChats(false);setClusterMode(false);setInboxMode(false)}}>Projektek</button>
+       <button className={showChats&&!clusterMode&&!inboxMode?'on':''} onClick={()=>{setShowChats(true);setClusterMode(false);setInboxMode(false)}}>Chatek</button>
+       <button className={showChats&&inboxMode?'on':''} onClick={()=>{setShowChats(true);setClusterMode(false);setInboxMode(true)}}>Beérkező {inboxCount?'('+inboxCount+')':''}</button>
+       <button className={showChats&&clusterMode?'on':''} onClick={()=>{setShowChats(true);setClusterMode(true);setInboxMode(false)}}>Rendetlenség</button>
      </nav>
      <div className="tools"><button>◌</button><button>⚙</button><i/></div>
    </header>
@@ -389,15 +427,16 @@ export default function Home(){
       </button>)}</div>
    </section>}
    <section className="stats">
-     <Stat icon="▱" n={projects.length} label="Projekt" c="blue"/>
-     <Stat icon="•••" n={chats.length||projects.reduce((a,p)=>a+p.chats,0)} label="Chat" c="cyan"/>
-     <Stat icon="≋" n={projects.filter(p=>p.last==='Ma').length} label="Aktív ma" c="green"/>
-     <Stat icon="★" n={projects.filter(p=>p.favorite).length} label="Kedvenc" c="orange"/>
+     <Stat icon="▱" n={projects.filter(p=>!p.archived).length} label="Projekt" c="blue"/>
+     <Stat icon="•••" n={chats.filter(c=>!c.archived).length||projects.reduce((a,p)=>a+p.chats,0)} label="Chat" c="cyan"/>
+     <Stat icon="⇥" n={inboxCount} label="Beérkező" c="green"/>
+     <Stat icon="✦" n={duplicateGroups.length} label="Duplikáció" c="orange"/>
    </section>
 
    {importSummary&&<section className="importBanner"><div><small>LEGUTÓBBI IMPORT</small><b>{importSummary.total} beszélgetés</b><span>{importSummary.assigned} automatikusan projekthez rendelve · {importSummary.total-importSummary.assigned} még rendezetlen</span></div><button onClick={()=>setShowChats(true)}>Chatek rendezése →</button></section>}
 
-   <Head title="Aktív projektek" sub="A legfontosabb munkáid most"/>
+   <Head title={showProjectArchive?'Archivált projektek':'Aktív projektek'} sub={showProjectArchive?'Lezárt és parkolópályás munkák':'A legfontosabb munkáid most'}/>
+   <div className="projectMode"><button className={!showProjectArchive?'on':''} onClick={()=>setShowProjectArchive(false)}>Aktív</button><button className={showProjectArchive?'on':''} onClick={()=>setShowProjectArchive(true)}>Archív</button></div>
    <div className="filters">{(['Összes','Aktív','Kedvenc','Legutóbbi'] as const).map(x=><button key={x} className={filter===x?'on':''} onClick={()=>setFilter(x)}>{x}</button>)}</div>
 
    <section className="cards">
@@ -414,10 +453,11 @@ export default function Home(){
       <div className="catTop"><i>{c[3]}</i><div><h3>{c[0]}</h3><p>{c[1]}</p></div><span>›</span></div>
    </article>)}</section>
 
-   <section className="messy"><i>✦</i><div><small>RENDETLENSÉG-FIGYELŐ</small><h3>{clusters.length?clusters.length+' hasonló beszélgetéscsoportot találtam':(chats.filter(c=>!c.assignedProjectId).length||13)+' rendezetlen beszélgetés vár besorolásra'}</h3><p>A rendszer cím, tartalom és közös kulcsszavak alapján csoportosít.</p></div><button onClick={()=>{setShowChats(true);setClusterMode(true)}}>Megnézem</button></section>
+   <section className="inboxCard"><i>⇥</i><div><small>BEÉRKEZŐ</small><h3>{inboxCount?inboxCount+' chat még nincs projekthez rendelve':'Minden chat a helyén van'}</h3><p>Ide kerül minden olyan beszélgetés, amelynél még nem biztos, hova tartozik.</p></div><button onClick={()=>{setShowChats(true);setClusterMode(false);setInboxMode(true)}}>Rendezem</button></section>
+   <section className="messy"><i>✦</i><div><small>RENDETLENSÉG-FIGYELŐ</small><h3>{duplicateGroups.length?duplicateGroups.length+' lehetséges duplikáció · ':''}{clusters.length?clusters.length+' hasonló témacsoport':(inboxCount||13)+' rendezetlen beszélgetés'}</h3><p>A rendszer külön jelzi a duplikációkat és a tartalmilag összetartozó chateket.</p></div><button onClick={()=>{setShowChats(true);setClusterMode(true);setInboxMode(false)}}>Megnézem</button></section>
    </> : <>
     <section className="hero compactHero">
-      <div><small>✦ {clusterMode?'RENDETLENSÉG / KLASZTEREK':'BESZÉLGETÉSKATALÓGUS'}</small><h1>{clusterMode?'Kapcsolódó csetek':'Chatek'}</h1><p>{clusterMode?(clusters.length?clusters.length+' valószínű témacsoport':'Import után itt jelennek meg a hasonló csetek'):(chats.length?chats.length+' importált vagy rögzített beszélgetés':'Még nincs importált beszélgetés.')}</p></div>
+      <div><small>✦ {clusterMode?'RENDETLENSÉG / KLASZTEREK':inboxMode?'BEÉRKEZŐ':'BESZÉLGETÉSKATALÓGUS'}</small><h1>{clusterMode?'Kapcsolódó csetek':inboxMode?'Rendezetlen chatek':'Chatek'}</h1><p>{clusterMode?(clusters.length?clusters.length+' valószínű témacsoport':'Import után itt jelennek meg a hasonló csetek'):inboxMode?(inboxCount?inboxCount+' chat vár besorolásra':'Minden rendezve'):(chats.length?chats.length+' importált vagy rögzített beszélgetés':'Még nincs importált beszélgetés.')}</p></div>
       <div className="heroBtns"><button className="primary" onClick={()=>setShowImport(true)}>⇩ Import</button><button className="soft" onClick={()=>setClusterMode(!clusterMode)}>{clusterMode?'□ Chatlista':'✦ Klaszterek'}</button><button className="soft" onClick={()=>setShowArchived(!showArchived)}>{showArchived?'↩ Aktív':'◌ Archív'}</button></div>
     </section>
     {!clusterMode?<>
@@ -443,6 +483,7 @@ export default function Home(){
         })}
       </section>
     </>:<section className="clusterList">
+      {duplicateGroups.length>0&&<div className="duplicateSection"><div className="duplicateHead"><small>DUPLIKÁCIÓFIGYELŐ</small><b>{duplicateGroups.length} gyanús csoport</b></div>{duplicateGroups.slice(0,6).map((g,i)=><article className="duplicateCard" key={g[0].id}><div><span>{String(i+1).padStart(2,'0')}</span><div><b>{g[0].title}</b><small>{g.length} nagyon hasonló beszélgetés</small></div></div><div className="duplicateItems">{g.slice(0,4).map(c=><p key={c.id}><strong>{niceDate(c.updated)}</strong>{c.title}</p>)}</div><button onClick={()=>archiveDuplicateGroup(g)}>Régebbiek archiválása</button></article>)}</div>}
       {clusters.length===0?<div className="emptyState"><div>✦</div><h3>Még nincs mit csoportosítani</h3><p>Importáld a ChatGPT előzményeidet. Legalább két hasonló beszélgetésnél már megjelenik egy témaklaszter.</p><button className="primary" onClick={()=>setShowImport(true)}>Import indítása</button></div>:
       clusters.map((cl,i)=>{
         const suggested=projects.find(p=>p.id===cl.projectId);
@@ -461,12 +502,13 @@ export default function Home(){
     </section>}
    </>}
 
-   <div className="dock"><button className={!showChats?'on':''} onClick={()=>{setShowChats(false);setClusterMode(false)}}>⌂<small>Kezdőlap</small></button><button onClick={()=>{setShowChats(false);setClusterMode(false)}}>▱<small>Projektek</small></button><button className="plus" onClick={()=>setComposer('project')}>＋</button><button className={showChats&&!clusterMode?'on':''} onClick={()=>{setShowChats(true);setClusterMode(false)}}>□<small>Chatek</small></button><button className={showChats&&clusterMode?'on':''} onClick={()=>{setShowChats(true);setClusterMode(true)}}>✦<small>Rend</small></button></div>
+   <div className="dock"><button className={!showChats?'on':''} onClick={()=>{setShowChats(false);setClusterMode(false);setInboxMode(false)}}>⌂<small>Kezdőlap</small></button><button className={showChats&&inboxMode?'on':''} onClick={()=>{setShowChats(true);setClusterMode(false);setInboxMode(true)}}>⇥<small>Beérkező</small></button><button className="plus" onClick={()=>setComposer('project')}>＋</button><button className={showChats&&!clusterMode&&!inboxMode?'on':''} onClick={()=>{setShowChats(true);setClusterMode(false);setInboxMode(false)}}>□<small>Chatek</small></button><button className={showChats&&clusterMode?'on':''} onClick={()=>{setShowChats(true);setClusterMode(true);setInboxMode(false)}}>✦<small>Rend</small></button></div>
 
    {selected&&<div className="overlay" onClick={()=>setSelected(null)}><section className="sheet" onClick={e=>e.stopPropagation()}>
       <button className="x" onClick={()=>setSelected(null)}>×</button>
       <div className={'sheetHero '+selected.accent}><small>{selected.category}</small><h2>{selected.name}</h2><p>{selected.summary}</p></div>
-      <div className="sheetBtns"><button className="primary" onClick={()=>setComposer('chat')}>＋ Új chat</button><button className="soft" onClick={()=>setProjects(xs=>xs.map(p=>p.id===selected.id?{...p,favorite:!p.favorite}:p))}>{selected.favorite?'★ Kedvenc':'☆ Kedvencekhez'}</button></div>
+      <div className="sheetBtns"><button className="primary" onClick={()=>setComposer('chat')}>＋ Új chat</button><button className="soft" onClick={()=>updateSelected({favorite:!selected.favorite})}>{selected.favorite?'★ Kedvenc':'☆ Kedvencekhez'}</button></div>
+      <div className="projectEditor"><label><span>Projekt neve</span><input value={selected.name} onChange={e=>updateSelected({name:e.target.value})}/></label><label><span>Kategória</span><select value={selected.category} onChange={e=>updateSelected({category:e.target.value})}>{['OKTATÁS','MOTA','APP FEJLESZTÉS','GASZTRO','TANULMÁNY / PHD','MAGÁN','ÖTLETEK','LEZÁRT / PARKOLÓ'].map(x=><option key={x}>{x}</option>)}</select></label><label><span>Állapot</span><select value={selected.status} onChange={e=>updateSelected({status:e.target.value as Project['status']})}>{['Aktív','Fejlesztés','Rendezendő','Parkoló'].map(x=><option key={x}>{x}</option>)}</select></label><label className="wide"><span>Következő lépés</span><input value={selected.next} onChange={e=>updateSelected({next:e.target.value})}/></label></div>
       <div className="info"><div><span>Importált / hozzárendelt chatek</span><b>{selectedChats.length}</b></div><div><span>Témák</span><b>{selectedTopics.length}</b></div><div><span>Következő</span><b>{selected.next}</b></div></div>
       {selectedTopics.length>0&&<div className="topicGrid">{selectedTopics.map(t=>{
         const n=selectedChats.filter(c=>c.topicId===t.id).length;
@@ -474,7 +516,7 @@ export default function Home(){
       })}</div>}
       {selectedChats.filter(c=>!c.topicId).slice(0,4).map(c=><div className="miniChat" key={c.id}><b>{c.title}</b><span>{niceDate(c.updated)}</span></div>)}
       {selectedChats.length>4&&<button className="soft fullBtn" onClick={()=>{setQuery(selected.name.split(' ')[0]);setShowChats(true);setSelected(null)}}>Összes beszélgetés megnyitása</button>}
-      <button className="delete" onClick={()=>remove(selected.id)}>⌫ Törlés a katalógusból</button>
+      <div className="dangerActions">{selected.archived?<button className="soft" onClick={()=>archiveProject(selected.id,false)}>↩ Projekt visszaállítása</button>:<button className="soft" onClick={()=>archiveProject(selected.id,true)}>◌ Projekt archiválása</button>}<button className="delete" onClick={()=>remove(selected.id)}>⌫ Törlés a katalógusból</button></div>
    </section></div>}
 
    {composer&&<div className="overlay" onClick={()=>setComposer(null)}><section className="composer" onClick={e=>e.stopPropagation()}>
