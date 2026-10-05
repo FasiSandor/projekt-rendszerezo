@@ -13,7 +13,7 @@ type Project={
 };
 type ChatItem={
   id:string;title:string;preview:string;searchText?:string;updated:string;source:'import'|'manual';
-  assignedProjectId?:string;topicId?:string;archived?:boolean;projectRef?:string|null;
+  assignedProjectId?:string;topicId?:string;archived?:boolean;projectRef?:string|null;order?:number;
 };
 type Topic={id:string;projectId:string;name:string;createdAt:string};
 type ImportLog={id:string;date:string;fileName:string;total:number;added:number;updated:number;unchanged:number;assigned:number};
@@ -259,6 +259,19 @@ function suggestDestination(chat:ChatItem,projects:Project[],topics:Topic[]){
   return {projectId:best.project.id,projectName:best.project.name,confidence,topicId:bestTopic?.topic.id,topicName:bestTopic?.topic.name,topicConfidence,reasons:[...new Set(reasons)].slice(0,3)};
 }
 
+function ensureLogicalOrder(items:ChatItem[]){
+  const next=items.map(c=>({...c}));
+  const groups=new Map<string,ChatItem[]>();
+  for(const c of next){if(!c.assignedProjectId)continue;if(!groups.has(c.assignedProjectId))groups.set(c.assignedProjectId,[]);groups.get(c.assignedProjectId)!.push(c)}
+  for(const group of groups.values()){
+    const used=group.filter(c=>Number.isFinite(c.order)).sort((a,b)=>(a.order??0)-(b.order??0));
+    const unordered=group.filter(c=>!Number.isFinite(c.order)).sort((a,b)=>a.updated.localeCompare(b.updated));
+    [...used,...unordered].forEach((c,i)=>{c.order=i});
+  }
+  return next;
+}
+function orderedProjectChats(items:ChatItem[]){return [...items].sort((a,b)=>{const ao=Number.isFinite(a.order)?a.order!:Number.MAX_SAFE_INTEGER;const bo=Number.isFinite(b.order)?b.order!:Number.MAX_SAFE_INTEGER;return ao!==bo?ao-bo:a.updated.localeCompare(b.updated)})}
+
 function inferProject(title:string,preview:string,projects:Project[]){
   const hay=(title+' '+preview).toLowerCase();
   const rules:{id:string;words:string[]}[]=[
@@ -309,6 +322,7 @@ export default function Home(){
  const [importLogs,setImportLogs]=useState<ImportLog[]>([]);
  const [importSummary,setImportSummary]=useState<{total:number;added:number;updated:number;unchanged:number;assigned:number}|null>(null);
  const [importBusy,setImportBusy]=useState(false);
+ const [dragChatId,setDragChatId]=useState<string|null>(null);
  const fileRef=useRef<HTMLInputElement>(null);
  const backupRef=useRef<HTMLInputElement>(null);
 
@@ -457,7 +471,8 @@ export default function Home(){
      const p:Project={id:crypto.randomUUID(),name:v,category:'ÚJ PROJEKT',chats:0,accent:'cyan',status:'Aktív',summary:'Új projekt. A részletek később finomíthatók.',next:'első beszélgetés indítása',last:'Ma',tags:['Új']};
      setProjects(x=>[p,...x]);flash('Projekt létrehozva');
    }else{
-     const c:ChatItem={id:crypto.randomUUID(),title:v,preview:'Kézzel létrehozott beszélgetés-bejegyzés',updated:new Date().toISOString(),source:'manual',assignedProjectId:selected?.id};
+     const nextOrder=selected?Math.max(-1,...chats.filter(c=>c.assignedProjectId===selected.id).map(c=>Number.isFinite(c.order)?c.order!:-1))+1:undefined;
+     const c:ChatItem={id:crypto.randomUUID(),title:v,preview:'Kézzel létrehozott beszélgetés-bejegyzés',updated:new Date().toISOString(),source:'manual',assignedProjectId:selected?.id,order:nextOrder};
      setChats(x=>[c,...x]);
      if(selected)setProjects(xs=>xs.map(p=>p.id===selected.id?{...p,chats:p.chats+1,last:'Ma'}:p));
      flash('Új chat-bejegyzés létrehozva');
@@ -556,7 +571,7 @@ export default function Home(){
          id,title,preview,searchText,
          updated:parseChatDate(c?.update_time||c?.create_time),
          source:'import',assignedProjectId:autoProject,projectRef,
-         topicId:old?.topicId,archived:old?.archived
+         topicId:old?.topicId,archived:old?.archived,order:old?.order
        };
        if(!old)added++;
        else{
@@ -569,7 +584,7 @@ export default function Home(){
      const unique=new Map<string,ChatItem>();
      for(const c of chats)unique.set(c.id,c);
      for(const c of parsed)unique.set(c.id,c);
-     const next=[...unique.values()];
+     const next=ensureLogicalOrder([...unique.values()]);
      const counts=new Map<string,number>();
      next.filter(c=>!c.archived).forEach(c=>{if(c.assignedProjectId)counts.set(c.assignedProjectId,(counts.get(c.assignedProjectId)||0)+1)});
      const nextProjects=[...projects,...importedProjects].map(p=>({...p,chats:counts.get(p.id)||0}));
@@ -592,7 +607,10 @@ export default function Home(){
    }
  }
  function assignChat(chatId:string,projectId:string){
-   setChats(cs=>cs.map(c=>c.id===chatId?{...c,assignedProjectId:projectId||undefined,topicId:projectId&&projectId===c.assignedProjectId?c.topicId:undefined}:c));
+   setChats(cs=>{
+     const maxOrder=projectId?Math.max(-1,...cs.filter(c=>c.assignedProjectId===projectId&&c.id!==chatId).map(c=>Number.isFinite(c.order)?c.order!:-1))+1:undefined;
+     return cs.map(c=>c.id===chatId?{...c,assignedProjectId:projectId||undefined,topicId:projectId&&projectId===c.assignedProjectId?c.topicId:undefined,order:projectId?(c.assignedProjectId===projectId&&Number.isFinite(c.order)?c.order:maxOrder):undefined}:c);
+   });
  }
  function acceptSuggestion(chatId:string){
    const chat=chats.find(c=>c.id===chatId);if(!chat)return;
@@ -667,6 +685,14 @@ export default function Home(){
    const t=topics.find(x=>x.id===id);if(!t||!confirm('Törlöd ezt a témát? A chatek a projektben maradnak.'))return;
    setTopics(ts=>ts.filter(x=>x.id!==id));setChats(cs=>cs.map(c=>c.topicId===id?{...c,topicId:undefined}:c));flash('Téma törölve');
  }
+ function setProjectSequence(projectId:string,ids:string[]){
+   const pos=new Map(ids.map((id,i)=>[id,i]));
+   setChats(cs=>cs.map(c=>c.assignedProjectId===projectId&&pos.has(c.id)?{...c,order:pos.get(c.id)}:c));
+ }
+ function autoOrderProject(projectId:string){const ids=chats.filter(c=>c.assignedProjectId===projectId&&!c.archived).sort((a,b)=>a.updated.localeCompare(b.updated)).map(c=>c.id);setProjectSequence(projectId,ids);flash('Chat-sorrend időrend alapján rendezve')}
+ function moveProjectChat(projectId:string,chatId:string,delta:-1|1){const ids=orderedProjectChats(chats.filter(c=>c.assignedProjectId===projectId&&!c.archived)).map(c=>c.id);const from=ids.indexOf(chatId),to=from+delta;if(from<0||to<0||to>=ids.length)return;[ids[from],ids[to]]=[ids[to],ids[from]];setProjectSequence(projectId,ids)}
+ function dropProjectChat(projectId:string,targetId:string){if(!dragChatId||dragChatId===targetId){setDragChatId(null);return}const ids=orderedProjectChats(chats.filter(c=>c.assignedProjectId===projectId&&!c.archived)).map(c=>c.id);const from=ids.indexOf(dragChatId),to=ids.indexOf(targetId);if(from<0||to<0){setDragChatId(null);return}const [moved]=ids.splice(from,1);ids.splice(to,0,moved);setProjectSequence(projectId,ids);setDragChatId(null);flash('Chat-sorrend frissítve')}
+ function continueFromChat(c:ChatItem){if(c.source==='import')window.open('https://chatgpt.com/c/'+c.id,'_blank','noopener,noreferrer');else flash('Ez kézi bejegyzés, nincs hozzá ChatGPT-link')}
  function exportBackup(){
    const blob=new Blob([JSON.stringify({version:1,exportedAt:new Date().toISOString(),projects,chats,topics},null,2)],{type:'application/json'});
    const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='chathub-backup.json';a.click();URL.revokeObjectURL(url);flash('Biztonsági mentés elkészült');
@@ -680,7 +706,7 @@ export default function Home(){
    }catch{alert('Ez nem érvényes ChatHub biztonsági mentés.')}
    finally{if(backupRef.current)backupRef.current.value=''}
  }
- const selectedChats=selected?chats.filter(c=>c.assignedProjectId===selected.id&&!c.archived):[];
+ const selectedChats=selected?orderedProjectChats(chats.filter(c=>c.assignedProjectId===selected.id&&!c.archived)):[];
  const selectedTopics=selected?topics.filter(t=>t.projectId===selected.id):[];
 
  return <main className="shell">
@@ -801,6 +827,14 @@ export default function Home(){
       <div className="sheetBtns"><button className="primary" onClick={()=>setComposer('chat')}>＋ Új chat</button><button className="soft" onClick={()=>updateSelected({favorite:!selected.favorite})}>{selected.favorite?'★ Kedvenc':'☆ Kedvencekhez'}</button></div>
       <div className="projectEditor"><label><span>Projekt neve</span><input value={selected.name} onChange={e=>updateSelected({name:e.target.value})}/></label><label><span>Kategória</span><select value={selected.category} onChange={e=>updateSelected({category:e.target.value})}>{['OKTATÁS','MOTA','APP FEJLESZTÉS','GASZTRO','TANULMÁNY / PHD','MAGÁN','ÖTLETEK','LEZÁRT / PARKOLÓ'].map(x=><option key={x}>{x}</option>)}</select></label><label><span>Állapot</span><select value={selected.status} onChange={e=>updateSelected({status:e.target.value as Project['status']})}>{['Aktív','Fejlesztés','Rendezendő','Parkoló'].map(x=><option key={x}>{x}</option>)}</select></label><label className="wide"><span>Következő lépés</span><input value={selected.next} onChange={e=>updateSelected({next:e.target.value})}/></label></div>
       <div className="info"><div><span>Importált / hozzárendelt chatek</span><b>{selectedChats.length}</b></div><div><span>Témák</span><b>{selectedTopics.length}</b></div><div><span>Következő</span><b>{selected.next}</b></div></div>
+      {selectedChats.length>0&&<section className="sequenceBox">
+        <div className="sequenceHead"><div><small>CHAT-SORREND</small><b>Melyik beszélgetés melyik után következik</b><span>Húzd a helyére, vagy használd a nyilakat. A kézi sorrend import után is megmarad.</span></div><button className="soft" onClick={()=>autoOrderProject(selected.id)}>↻ Időrendi alaphelyzet</button></div>
+        <div className="sequenceList">{selectedChats.map((c,i)=><article className={'sequenceRow '+(dragChatId===c.id?'dragging':'')} key={c.id} draggable onDragStart={()=>setDragChatId(c.id)} onDragEnd={()=>setDragChatId(null)} onDragOver={e=>e.preventDefault()} onDrop={()=>dropProjectChat(selected.id,c.id)}>
+          <div className="sequenceNum">{String(i+1).padStart(2,'0')}</div>
+          <div className="sequenceCopy"><b>{c.title}</b><span>{niceDate(c.updated)} · {c.topicId?(topics.find(t=>t.id===c.topicId)?.name||'Téma'):'Nincs téma'}</span><small>{i===0?'Kezdés':'← '+selectedChats[i-1].title} <em>•</em> {i===selectedChats.length-1?'Jelenlegi vége':selectedChats[i+1].title+' →'}</small></div>
+          <div className="sequenceActions"><button disabled={i===0} onClick={()=>moveProjectChat(selected.id,c.id,-1)}>↑</button><button disabled={i===selectedChats.length-1} onClick={()=>moveProjectChat(selected.id,c.id,1)}>↓</button>{i===selectedChats.length-1&&<button className="continueBtn" onClick={()=>continueFromChat(c)}>Folytatás innen ↗</button>}</div>
+        </article>)}</div>
+      </section>}
       {selectedTopics.length>0&&<div className="topicGrid">{selectedTopics.map(t=>{
         const n=selectedChats.filter(c=>c.topicId===t.id).length;
         return <button key={t.id} onClick={()=>{setQuery(t.name);setShowChats(true);setSelected(null)}}><i>◇</i><span><b>{t.name}</b><small>{n} chat</small></span></button>
